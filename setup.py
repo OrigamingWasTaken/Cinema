@@ -260,3 +260,71 @@ class ProwlarrConfigurator:
         })
 
         print("  Prowlarr configured (FlareSolverr proxy, Radarr application)")
+
+
+def main():
+    print("=" * 50)
+    print("Cinema Stack Setup")
+    print("=" * 50)
+
+    print("\n[Phase 1] Loading configuration...")
+    if not os.path.exists(".env"):
+        if os.path.exists(".env.example"):
+            import shutil
+            print("No .env file found. Copying .env.example to .env")
+            print("Please edit .env with your values and re-run this script.")
+            shutil.copy(".env.example", ".env")
+            sys.exit(0)
+        else:
+            print("No .env or .env.example found.")
+            sys.exit(1)
+
+    config = EnvConfig(".env")
+    print(f"  Data path: {config.data_path}")
+    print(f"  Config path: {config.config_path}")
+    print(f"  PUID:PGID = {config.puid}:{config.pgid}")
+
+    print("\n[Phase 2] Creating directories...")
+    dirs = DirectorySetup(config.data_path, config.config_path)
+    dirs.create()
+    print("  Directories created.")
+
+    print("\n[Phase 3] Launching Docker stack...")
+    launcher = StackLauncher()
+    launcher.start()
+    launcher.wait_for_healthy()
+
+    print("\n[Phase 4] Configuring services...")
+
+    print("  Configuring qBittorrent...")
+    qb = QBittorrentConfigurator(config.qb_password)
+    qb.configure()
+
+    print("  Configuring Radarr...")
+    radarr = RadarrConfigurator(config.config_path, config.qb_password)
+    radarr.configure()
+
+    print("  Configuring Prowlarr...")
+    prowlarr = ProwlarrConfigurator(config.config_path, radarr.api_key)
+    prowlarr.configure()
+
+    print("\n" + "=" * 50)
+    print("Setup complete!")
+    print("=" * 50)
+    print("\nService URLs (replace localhost with your Synology IP):")
+    print("  Radarr:       http://localhost:7878")
+    print("  Prowlarr:     http://localhost:9696")
+    print("  qBittorrent:  http://localhost:8080")
+    print("  FlareSolverr: http://localhost:8191")
+    print("\nqBittorrent credentials: admin / <your QB_PASSWORD from .env>")
+    print("\nRemaining manual steps:")
+    print("  1. Open Prowlarr and add torrent indexers (1337x, etc.)")
+    print(f"  2. On Apple TV: open Infuse -> add SMB share ->")
+    print(f"     point to {config.data_path}/media/movies")
+    print("  3. On iOS: install LunaSea, add Radarr server")
+    print("     (or use Radarr web UI in browser on any device)")
+    print("  4. Optional: adjust quality profiles in Radarr")
+
+
+if __name__ == "__main__":
+    main()
