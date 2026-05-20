@@ -58,11 +58,11 @@ class DirectorySetup:
 
 
 class StackLauncher:
-    HEALTH_ENDPOINTS = {
-        "qbittorrent": "http://localhost:8080",
-        "radarr": "http://localhost:7878",
-        "prowlarr": "http://localhost:9696",
-        "flaresolverr": "http://localhost:8191",
+    HEALTH_PORTS = {
+        "qbittorrent": 8080,
+        "radarr": 7878,
+        "prowlarr": 9696,
+        "flaresolverr": 8191,
     }
 
     def start(self):
@@ -76,20 +76,25 @@ class StackLauncher:
             sys.exit(1)
         print("Containers started.")
 
+    @staticmethod
+    def _port_open(port: int) -> bool:
+        import socket
+        try:
+            with socket.create_connection(("localhost", port), timeout=2):
+                return True
+        except OSError:
+            return False
+
     def wait_for_healthy(self, timeout: int = 120):
         print(f"Waiting for services to be ready (timeout: {timeout}s)...")
         start = time.time()
-        pending = set(self.HEALTH_ENDPOINTS.keys())
+        pending = set(self.HEALTH_PORTS.keys())
 
         while pending and (time.time() - start) < timeout:
             for svc in list(pending):
-                try:
-                    req = Request(self.HEALTH_ENDPOINTS[svc])
-                    urlopen(req, timeout=3)
+                if self._port_open(self.HEALTH_PORTS[svc]):
                     print(f"  {svc} is ready")
                     pending.discard(svc)
-                except Exception:
-                    pass
             if pending:
                 time.sleep(3)
 
