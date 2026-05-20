@@ -60,8 +60,8 @@ class DirectorySetup:
 class StackLauncher:
     HEALTH_ENDPOINTS = {
         "qbittorrent": "http://localhost:8080",
-        "radarr": "http://localhost:7878/api/v3/system/status",
-        "prowlarr": "http://localhost:9696/api/v1/system/status",
+        "radarr": "http://localhost:7878",
+        "prowlarr": "http://localhost:9696",
         "flaresolverr": "http://localhost:8191",
     }
 
