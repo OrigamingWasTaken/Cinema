@@ -57,5 +57,29 @@ class TestEnvConfig(unittest.TestCase):
             os.unlink(env_path)
 
 
+class TestDirectorySetup(unittest.TestCase):
+    def test_creates_expected_directories(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            config_dir = os.path.join(data_dir, "config")
+            from setup import DirectorySetup
+            ds = DirectorySetup(data_path=data_dir, config_path=config_dir)
+            ds.create()
+
+            self.assertTrue(os.path.isdir(os.path.join(data_dir, "torrents", "movies")))
+            self.assertTrue(os.path.isdir(os.path.join(data_dir, "media", "movies")))
+            self.assertTrue(os.path.isdir(os.path.join(config_dir, "qbittorrent")))
+            self.assertTrue(os.path.isdir(os.path.join(config_dir, "radarr")))
+            self.assertTrue(os.path.isdir(os.path.join(config_dir, "prowlarr")))
+            self.assertTrue(os.path.isdir(os.path.join(config_dir, "flaresolverr")))
+
+    def test_idempotent(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            config_dir = os.path.join(data_dir, "config")
+            from setup import DirectorySetup
+            ds = DirectorySetup(data_path=data_dir, config_path=config_dir)
+            ds.create()
+            ds.create()
+
+
 if __name__ == "__main__":
     unittest.main()
