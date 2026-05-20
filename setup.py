@@ -120,6 +120,29 @@ class StackLauncher:
         print(f"Timed out waiting for config files: {missing}")
         sys.exit(1)
 
+    @staticmethod
+    def configure_auth(config_path: str):
+        for svc in ["radarr", "prowlarr"]:
+            config_xml = os.path.join(config_path, svc, "config.xml")
+            tree = ET.parse(config_xml)
+            root = tree.getroot()
+
+            def set_or_create(tag: str, value: str):
+                el = root.find(tag)
+                if el is None:
+                    el = ET.SubElement(root, tag)
+                el.text = value
+
+            set_or_create("AuthenticationMethod", "Forms")
+            set_or_create("AuthenticationRequired", "DisabledForLocalAddresses")
+            set_or_create("AuthenticationType", "forms")
+            tree.write(config_xml, xml_declaration=True, encoding="utf-8")
+            print(f"  {svc}: auth set to Forms (disabled for local addresses)")
+
+        print("  Restarting Radarr and Prowlarr to apply auth config...")
+        subprocess.run(["sudo", "docker", "restart", "radarr", "prowlarr"],
+                       capture_output=True, text=True)
+
 
 class QBittorrentConfigurator:
     BASE_URL = "http://localhost:8080"
@@ -317,6 +340,11 @@ def main():
     launcher.start()
     launcher.wait_for_healthy()
     launcher.wait_for_config_files(config.config_path)
+
+    print("\n[Phase 3b] Configuring authentication...")
+    launcher.configure_auth(config.config_path)
+    time.sleep(10)
+    launcher.wait_for_healthy()
 
     print("\n[Phase 4] Configuring services...")
 
