@@ -143,5 +143,32 @@ class TestProwlarrConfigurator(unittest.TestCase):
             self.assertEqual(api_key, "prowlarr-key-67890")
 
 
+class TestIntegration(unittest.TestCase):
+    def test_full_config_loading_and_directory_creation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = os.path.join(tmpdir, ".env")
+            data_path = os.path.join(tmpdir, "data")
+            config_path = os.path.join(tmpdir, "config")
+            os.makedirs(data_path)
+
+            with open(env_path, "w") as f:
+                f.write(f"PUID=1000\n")
+                f.write(f"PGID=1000\n")
+                f.write(f"TZ=Europe/Zurich\n")
+                f.write(f"DATA_PATH={data_path}\n")
+                f.write(f"CONFIG_PATH={config_path}\n")
+                f.write(f"QB_PASSWORD=testpass\n")
+
+            from setup import EnvConfig, DirectorySetup
+            config = EnvConfig(env_path)
+            ds = DirectorySetup(config.data_path, config.config_path)
+            ds.create()
+
+            self.assertTrue(os.path.isdir(os.path.join(data_path, "torrents", "movies")))
+            self.assertTrue(os.path.isdir(os.path.join(data_path, "media", "movies")))
+            self.assertTrue(os.path.isdir(os.path.join(config_path, "radarr")))
+            self.assertEqual(config.qb_password, "testpass")
+
+
 if __name__ == "__main__":
     unittest.main()
