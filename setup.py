@@ -68,7 +68,7 @@ class StackLauncher:
     def start(self):
         print("Starting Docker stack...")
         result = subprocess.run(
-            ["docker", "compose", "up", "-d"],
+            ["sudo", "docker", "compose", "up", "-d"],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -115,7 +115,7 @@ class QBittorrentConfigurator:
 
     def get_temp_password(self) -> str:
         result = subprocess.run(
-            ["docker", "logs", "qbittorrent"],
+            ["sudo", "docker", "logs", "qbittorrent"],
             capture_output=True, text=True,
         )
         return self.parse_temp_password(result.stdout + result.stderr)
