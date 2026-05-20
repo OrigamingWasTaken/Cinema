@@ -53,7 +53,8 @@ class DirectorySetup:
     def create(self):
         for d in DATA_DIRS:
             os.makedirs(os.path.join(self.data_path, d), exist_ok=True)
-        os.makedirs(self.config_path, exist_ok=True)
+        for svc in CONFIG_SERVICES:
+            os.makedirs(os.path.join(self.config_path, svc), exist_ok=True)
 
 
 class StackLauncher:
