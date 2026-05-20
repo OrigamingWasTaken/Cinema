@@ -96,3 +96,56 @@ class StackLauncher:
             print(f"Timed out waiting for: {', '.join(pending)}")
             sys.exit(1)
         print("All services are ready.")
+
+
+class QBittorrentConfigurator:
+    BASE_URL = "http://localhost:8080"
+
+    def __init__(self, new_password: str):
+        self.new_password = new_password
+        self.cookie_jar = CookieJar()
+
+    @staticmethod
+    def parse_temp_password(logs: str) -> str:
+        match = re.search(r"A temporary password is provided for this session: (\S+)", logs)
+        if not match:
+            raise ValueError("Could not find temporary password in qBittorrent logs")
+        return match.group(1)
+
+    def get_temp_password(self) -> str:
+        result = subprocess.run(
+            ["docker", "logs", "qbittorrent"],
+            capture_output=True, text=True,
+        )
+        return self.parse_temp_password(result.stdout + result.stderr)
+
+    def _request(self, path: str, data: dict | None = None) -> bytes:
+        url = f"{self.BASE_URL}/api/v2{path}"
+        body = urlencode(data).encode() if data else None
+        req = Request(url, data=body)
+        self.cookie_jar.add_cookie_header(req)
+        resp = urlopen(req, timeout=10)
+        self.cookie_jar.extract_cookies(resp, req)
+        return resp.read()
+
+    def login(self, password: str):
+        self._request("/auth/login", {"username": "admin", "password": password})
+
+    def configure(self):
+        temp_pw = self.get_temp_password()
+        self.login(temp_pw)
+
+        self._request("/app/setPreferences", {
+            "json": json.dumps({
+                "save_path": "/data/torrents/movies",
+                "upnp": False,
+                "web_ui_password": self.new_password,
+            })
+        })
+
+        self._request("/torrents/createCategory", {
+            "category": "movies",
+            "savePath": "/data/torrents/movies",
+        })
+
+        print("  qBittorrent configured (password set, save path, category created)")

@@ -81,5 +81,25 @@ class TestDirectorySetup(unittest.TestCase):
             ds.create()
 
 
+class TestQBittorrentConfigurator(unittest.TestCase):
+    def test_extracts_temp_password_from_logs(self):
+        from setup import QBittorrentConfigurator
+        sample_logs = (
+            "Some startup log line\n"
+            "******** Information ********\n"
+            "To control qBittorrent, access the WebUI at: http://localhost:8080\n"
+            "The WebUI administrator password was not set. "
+            "A temporary password is provided for this session: abc123XYZ\n"
+            "You should set your own password in program preferences.\n"
+        )
+        password = QBittorrentConfigurator.parse_temp_password(sample_logs)
+        self.assertEqual(password, "abc123XYZ")
+
+    def test_raises_if_no_temp_password_found(self):
+        from setup import QBittorrentConfigurator
+        with self.assertRaises(ValueError):
+            QBittorrentConfigurator.parse_temp_password("no password here\n")
+
+
 if __name__ == "__main__":
     unittest.main()
