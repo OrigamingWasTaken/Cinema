@@ -67,10 +67,7 @@ class TestDirectorySetup(unittest.TestCase):
 
             self.assertTrue(os.path.isdir(os.path.join(data_dir, "torrents", "movies")))
             self.assertTrue(os.path.isdir(os.path.join(data_dir, "media", "movies")))
-            self.assertTrue(os.path.isdir(os.path.join(config_dir, "qbittorrent")))
-            self.assertTrue(os.path.isdir(os.path.join(config_dir, "radarr")))
-            self.assertTrue(os.path.isdir(os.path.join(config_dir, "prowlarr")))
-            self.assertTrue(os.path.isdir(os.path.join(config_dir, "flaresolverr")))
+            self.assertTrue(os.path.isdir(config_dir))
 
     def test_idempotent(self):
         with tempfile.TemporaryDirectory() as data_dir:
@@ -166,7 +163,7 @@ class TestIntegration(unittest.TestCase):
 
             self.assertTrue(os.path.isdir(os.path.join(data_path, "torrents", "movies")))
             self.assertTrue(os.path.isdir(os.path.join(data_path, "media", "movies")))
-            self.assertTrue(os.path.isdir(os.path.join(config_path, "radarr")))
+            self.assertTrue(os.path.isdir(config_path))
             self.assertEqual(config.qb_password, "testpass")
 
 

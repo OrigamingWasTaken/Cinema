@@ -53,8 +53,7 @@ class DirectorySetup:
     def create(self):
         for d in DATA_DIRS:
             os.makedirs(os.path.join(self.data_path, d), exist_ok=True)
-        for svc in CONFIG_SERVICES:
-            os.makedirs(os.path.join(self.config_path, svc), exist_ok=True)
+        os.makedirs(self.config_path, exist_ok=True)
 
 
 class StackLauncher:
@@ -102,6 +101,23 @@ class StackLauncher:
             print(f"Timed out waiting for: {', '.join(pending)}")
             sys.exit(1)
         print("All services are ready.")
+
+    @staticmethod
+    def wait_for_config_files(config_path: str, timeout: int = 60):
+        files = [
+            os.path.join(config_path, "radarr", "config.xml"),
+            os.path.join(config_path, "prowlarr", "config.xml"),
+        ]
+        print("Waiting for services to generate config files...")
+        start = time.time()
+        while (time.time() - start) < timeout:
+            if all(os.path.exists(f) for f in files):
+                print("  Config files found.")
+                return
+            time.sleep(3)
+        missing = [f for f in files if not os.path.exists(f)]
+        print(f"Timed out waiting for config files: {missing}")
+        sys.exit(1)
 
 
 class QBittorrentConfigurator:
@@ -299,6 +315,7 @@ def main():
     launcher = StackLauncher()
     launcher.start()
     launcher.wait_for_healthy()
+    launcher.wait_for_config_files(config.config_path)
 
     print("\n[Phase 4] Configuring services...")
 
