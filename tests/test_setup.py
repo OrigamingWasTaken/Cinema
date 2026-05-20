@@ -101,5 +101,47 @@ class TestQBittorrentConfigurator(unittest.TestCase):
             QBittorrentConfigurator.parse_temp_password("no password here\n")
 
 
+class TestRadarrConfigurator(unittest.TestCase):
+    def test_reads_api_key_from_config_xml(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_xml = os.path.join(d, "config.xml")
+            with open(config_xml, "w") as f:
+                f.write('<?xml version="1.0" encoding="utf-8"?>\n')
+                f.write("<Config>\n")
+                f.write("  <ApiKey>test-api-key-12345</ApiKey>\n")
+                f.write("  <Port>7878</Port>\n")
+                f.write("</Config>\n")
+
+            from setup import RadarrConfigurator
+            api_key = RadarrConfigurator.read_api_key(config_xml)
+            self.assertEqual(api_key, "test-api-key-12345")
+
+    def test_raises_if_no_api_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_xml = os.path.join(d, "config.xml")
+            with open(config_xml, "w") as f:
+                f.write('<?xml version="1.0" encoding="utf-8"?>\n')
+                f.write("<Config><Port>7878</Port></Config>\n")
+
+            from setup import RadarrConfigurator
+            with self.assertRaises(ValueError):
+                RadarrConfigurator.read_api_key(config_xml)
+
+
+class TestProwlarrConfigurator(unittest.TestCase):
+    def test_reads_api_key_from_config_xml(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_xml = os.path.join(d, "config.xml")
+            with open(config_xml, "w") as f:
+                f.write('<?xml version="1.0" encoding="utf-8"?>\n')
+                f.write("<Config>\n")
+                f.write("  <ApiKey>prowlarr-key-67890</ApiKey>\n")
+                f.write("</Config>\n")
+
+            from setup import ProwlarrConfigurator
+            api_key = ProwlarrConfigurator.read_api_key(config_xml)
+            self.assertEqual(api_key, "prowlarr-key-67890")
+
+
 if __name__ == "__main__":
     unittest.main()

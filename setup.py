@@ -149,3 +149,114 @@ class QBittorrentConfigurator:
         })
 
         print("  qBittorrent configured (password set, save path, category created)")
+
+
+class RadarrConfigurator:
+    BASE_URL = "http://localhost:7878"
+
+    def __init__(self, config_path: str, qb_password: str):
+        config_xml = os.path.join(config_path, "radarr", "config.xml")
+        self.api_key = self.read_api_key(config_xml)
+        self.qb_password = qb_password
+
+    @staticmethod
+    def read_api_key(config_xml: str) -> str:
+        tree = ET.parse(config_xml)
+        el = tree.find("ApiKey")
+        if el is None or not el.text:
+            raise ValueError(f"No ApiKey found in {config_xml}")
+        return el.text
+
+    def _request(self, method: str, path: str, body: dict | None = None):
+        url = f"{self.BASE_URL}/api/v3{path}"
+        data = json.dumps(body).encode() if body else None
+        req = Request(url, data=data, method=method)
+        req.add_header("X-Api-Key", self.api_key)
+        req.add_header("Content-Type", "application/json")
+        resp = urlopen(req, timeout=10)
+        content = resp.read()
+        return json.loads(content) if content else None
+
+    def configure(self):
+        self._request("POST", "/rootfolder", {"path": "/data/media/movies"})
+
+        self._request("POST", "/downloadclient", {
+            "name": "qBittorrent",
+            "implementation": "QBittorrent",
+            "protocol": "torrent",
+            "configContract": "QBittorrentSettings",
+            "fields": [
+                {"name": "host", "value": "qbittorrent"},
+                {"name": "port", "value": 8080},
+                {"name": "username", "value": "admin"},
+                {"name": "password", "value": self.qb_password},
+                {"name": "movieCategory", "value": "movies"},
+            ],
+            "enable": True,
+        })
+
+        naming = self._request("GET", "/config/naming")
+        naming["renameMovies"] = True
+        naming["standardMovieFormat"] = "{Movie CleanTitle} ({Release Year}) - {Quality Full}"
+        naming["movieFolderFormat"] = "{Movie CleanTitle} ({Release Year})"
+        self._request("PUT", "/config/naming", naming)
+
+        print("  Radarr configured (root folder, download client, naming)")
+
+
+class ProwlarrConfigurator:
+    BASE_URL = "http://localhost:9696"
+
+    def __init__(self, config_path: str, radarr_api_key: str):
+        config_xml = os.path.join(config_path, "prowlarr", "config.xml")
+        self.api_key = self.read_api_key(config_xml)
+        self.radarr_api_key = radarr_api_key
+
+    @staticmethod
+    def read_api_key(config_xml: str) -> str:
+        tree = ET.parse(config_xml)
+        el = tree.find("ApiKey")
+        if el is None or not el.text:
+            raise ValueError(f"No ApiKey found in {config_xml}")
+        return el.text
+
+    def _request(self, method: str, path: str, body: dict | None = None):
+        url = f"{self.BASE_URL}/api/v1{path}"
+        data = json.dumps(body).encode() if body else None
+        req = Request(url, data=data, method=method)
+        req.add_header("X-Api-Key", self.api_key)
+        req.add_header("Content-Type", "application/json")
+        resp = urlopen(req, timeout=10)
+        content = resp.read()
+        return json.loads(content) if content else None
+
+    def configure(self):
+        self._request("POST", "/tag", {"label": "flaresolverr"})
+        tags = self._request("GET", "/tag")
+        fs_tag_id = next(t["id"] for t in tags if t["label"] == "flaresolverr")
+
+        self._request("POST", "/indexerproxy", {
+            "name": "FlareSolverr",
+            "implementation": "FlareSolverr",
+            "configContract": "FlareSolverrSettings",
+            "fields": [
+                {"name": "host", "value": "http://flaresolverr:8191"},
+                {"name": "requestTimeout", "value": 60},
+            ],
+            "tags": [fs_tag_id],
+        })
+
+        self._request("POST", "/applications", {
+            "name": "Radarr",
+            "implementation": "Radarr",
+            "configContract": "RadarrSettings",
+            "syncLevel": "fullSync",
+            "fields": [
+                {"name": "prowlarrUrl", "value": "http://prowlarr:9696"},
+                {"name": "baseUrl", "value": "http://radarr:7878"},
+                {"name": "apiKey", "value": self.radarr_api_key},
+            ],
+            "tags": [],
+        })
+
+        print("  Prowlarr configured (FlareSolverr proxy, Radarr application)")
