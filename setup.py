@@ -9,6 +9,7 @@ import time
 import xml.etree.ElementTree as ET
 from http.cookiejar import CookieJar
 from urllib.parse import urlencode
+from typing import Optional
 from urllib.request import Request, urlopen
 
 
@@ -119,7 +120,7 @@ class QBittorrentConfigurator:
         )
         return self.parse_temp_password(result.stdout + result.stderr)
 
-    def _request(self, path: str, data: dict | None = None) -> bytes:
+    def _request(self, path: str, data: Optional[dict] = None) -> bytes:
         url = f"{self.BASE_URL}/api/v2{path}"
         body = urlencode(data).encode() if data else None
         req = Request(url, data=body)
@@ -167,7 +168,7 @@ class RadarrConfigurator:
             raise ValueError(f"No ApiKey found in {config_xml}")
         return el.text
 
-    def _request(self, method: str, path: str, body: dict | None = None):
+    def _request(self, method: str, path: str, body: Optional[dict] = None):
         url = f"{self.BASE_URL}/api/v3{path}"
         data = json.dumps(body).encode() if body else None
         req = Request(url, data=data, method=method)
@@ -220,7 +221,7 @@ class ProwlarrConfigurator:
             raise ValueError(f"No ApiKey found in {config_xml}")
         return el.text
 
-    def _request(self, method: str, path: str, body: dict | None = None):
+    def _request(self, method: str, path: str, body: Optional[dict] = None):
         url = f"{self.BASE_URL}/api/v1{path}"
         data = json.dumps(body).encode() if body else None
         req = Request(url, data=data, method=method)
