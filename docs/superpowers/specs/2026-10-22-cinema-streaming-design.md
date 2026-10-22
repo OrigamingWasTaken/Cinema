@@ -92,9 +92,12 @@ Radarr and qBittorrent are removed. Their config dirs stay on disk untouched as 
   ahead fetches that region first.
 - HTTP API: `POST /torrents` (magnet / .torrent URL / bytes, with `list_only`, `only_files`,
   `output_folder`), `GET /torrents/{id}/stats/v1`, `POST /torrents/{id}/pause|delete`.
-- Upload: `--ratelimit-upload` (bytes/s, min 1) and a `--disable-upload` flag that only exists if the
-  image was built with that cargo feature. Builder must check which is available in the pinned image and
-  use `--disable-upload` if present, else `RQBIT_RATELIMIT_UPLOAD=1`. Finished torrents are paused.
+- Upload: `--disable-upload` exists only behind a non-default cargo feature (checked in v9.0.1's
+  `Cargo.toml`), so the published image doesn't have it. Use `RQBIT_RATELIMIT_UPLOAD=1` (1 byte/s,
+  effectively nothing). Finished torrents are paused.
+- Image facts (v9.0.1 `docker/Dockerfile`): `FROM scratch`, entrypoint `/bin/rqbit`, default cmd
+  `server start /home/rqbit/downloads`, API on `0.0.0.0:3030`, peer port `4240`, state in
+  `/home/rqbit/db` and `/home/rqbit/cache`.
 
 ### Why WebDAV and not SMB / rqbit's UPnP
 
@@ -133,12 +136,13 @@ no Node build step, so the image builds quickly on the NAS. *(Builder's call wit
 **Hard filters (apply to Recommended *and* More):**
 - No CAM / TS / TC / SCR / R5 / workprint / HDCAM / 3D.
 - Seeders ≥ 1 (More), ≥ 3 (Recommended).
-- Language: from TMDB `original_language`:
-  - `fr` → release must carry French audio (`FRENCH`, `TRUEFRENCH`, `VFF`, `VFQ`, `MULTi`).
-  - anything else → must carry the original audio: reject French-only (`FRENCH`/`VFF`/`VFQ`/
-    `TRUEFRENCH` without `MULTi`) and anything tagged `DUBBED`. Untagged releases count as original.
-    `MULTi` and `VOSTFR` are allowed but ranked lower (Infuse often defaults to the French track of a
-    MULTi file).
+- Language: from TMDB `original_language`. Untagged releases count as original audio for every
+  language (scene groups don't tag original-language foreign films). Anything tagged `DUBBED` is
+  rejected.
+  - `fr` → untagged, `FRENCH`, `TRUEFRENCH`, `VFF`, `MULTi` are all fine.
+  - anything else → reject French-only (`FRENCH`/`TRUEFRENCH`/`VFF`/`VFQ`/`VF`/`VFI` without
+    `MULTi`). `MULTi`/`DUAL` and `VOSTFR` are allowed but ranked lower (Infuse often defaults to the
+    French track of a MULTi file).
 
 **Recommended — extra quality gate:**
 - Size floor scaled by runtime: 1080p ≥ `runtime_min × 0.045 GB` (~5 Mbit/s), 1440p ×1.3, 2160p ×2.
@@ -200,8 +204,9 @@ Free disk space shown at the bottom of the home screen.
   `/volume1/cinema/data/movies`.
 - `setup.py` stays stdlib-only and is rewritten for v2: validate `.env` (incl. `TMDB_TOKEN`), create
   dirs, copy v1 Prowlarr config if the new one is empty, `docker compose up -d --build`, wait for health,
-  configure Prowlarr (FlareSolverr proxy if missing, remove the stale Radarr application), hand the
-  Prowlarr API key to the app (env or `/config/cinema/secrets.json`), print URLs and the Infuse steps.
+  configure Prowlarr (FlareSolverr proxy if missing, remove the stale Radarr application), print URLs
+  and the Infuse steps. The app reads Prowlarr's API key itself from Prowlarr's `config.xml`, mounted
+  read-only into the cinema container (or `PROWLARR_API_KEY` if set).
 - Migration: stop & remove v1 `radarr` and `qbittorrent` containers (note any unfinished qBittorrent
   downloads first); v1 prowlarr/flaresolverr containers replaced by the v2 ones.
 - Deploy from the dev PC over SSH (key-based; user installs the key once).
