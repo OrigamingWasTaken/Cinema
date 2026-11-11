@@ -72,6 +72,10 @@ class RqbitClient:
         self._base = base_url.rstrip("/")
         self._http = http
 
+    @property
+    def http(self) -> httpx.AsyncClient:
+        return self._http
+
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         resp = await self._http.request(method, self._base + path, **kwargs)
         if not resp.is_success:

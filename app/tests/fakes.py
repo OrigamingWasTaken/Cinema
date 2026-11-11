@@ -1,4 +1,5 @@
 """In-memory rqbit used by the test suites (rqbit client, WebDAV, API)."""
+import asyncio
 import json
 import re
 from urllib.parse import unquote
@@ -16,8 +17,10 @@ class _TrackedStream(httpx.AsyncByteStream):
         self._closed = False
 
     async def __aiter__(self):
-        for i in range(0, len(self._data), CHUNK):
-            yield self._data[i : i + CHUNK]
+        size = self._owner.chunk_size
+        for i in range(0, len(self._data), size):
+            yield self._data[i : i + size]
+            await asyncio.sleep(0)  # let a client disconnect cancel the consumer
 
     async def aclose(self) -> None:
         if not self._closed:
@@ -43,6 +46,7 @@ class FakeRqbit:
         self.available: dict[tuple[int, int], int] = {}
         self.requests: list[dict] = []
         self.closed_streams: list[tuple[int, int]] = []
+        self.chunk_size = CHUNK
         self._next_id = 0
         self.transport = httpx.MockTransport(self._handle)
 
