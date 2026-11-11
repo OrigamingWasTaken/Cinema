@@ -1,38 +1,43 @@
 services:
-  qbittorrent:
-    image: linuxserver/qbittorrent:latest
-    container_name: qbittorrent
+  cinema:
+    build: ./app
+    container_name: cinema
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
       - TZ=${TZ}
-      - WEBUI_PORT=8080
+      - TMDB_TOKEN=${TMDB_TOKEN}
+      - TMDB_LANGUAGE=${TMDB_LANGUAGE}
+      - DAV_USER=${DAV_USER}
+      - DAV_PASSWORD=${DAV_PASSWORD}
     volumes:
-      - ${CONFIG_PATH}/qbittorrent:/config
       - ${DATA_PATH}:/data
+      - ${CONFIG_PATH}/cinema:/config
+      - ${CONFIG_PATH}/prowlarr:/prowlarr-config:ro
     ports:
-      - "8080:8080"
-      - "6881:6881"
-      - "6881:6881/udp"
+      - "8888:8888"
+    depends_on:
+      - rqbit
+      - prowlarr
     restart: unless-stopped
     networks:
       - cinema
 
-  radarr:
-    image: linuxserver/radarr:latest
-    container_name: radarr
+  rqbit:
+    image: ikatson/rqbit:9.0.1
+    container_name: rqbit
+    command: ["server", "start", "/data/movies"]
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
+      - RQBIT_RATELIMIT_UPLOAD=1
+      - RQBIT_UPNP_PORT_FORWARD_DISABLE=true
+      - RQBIT_LISTEN_PORT=4240
     volumes:
-      - ${CONFIG_PATH}/radarr:/config
       - ${DATA_PATH}:/data
+      - ${CONFIG_PATH}/rqbit/db:/home/rqbit/db
+      - ${CONFIG_PATH}/rqbit/cache:/home/rqbit/cache
     ports:
-      - "7878:7878"
+      - "4240:4240"
+      - "4240:4240/udp"
+      - "127.0.0.1:3030:3030"
     restart: unless-stopped
-    depends_on:
-      - qbittorrent
     networks:
       - cinema
 
@@ -57,8 +62,6 @@ services:
     environment:
       - LOG_LEVEL=info
       - TZ=${TZ}
-    ports:
-      - "8191:8191"
     restart: unless-stopped
     networks:
       - cinema

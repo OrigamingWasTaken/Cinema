@@ -3,3 +3,5 @@ config/
 __pycache__/
 *.pyc
 creds.txt
+app/.venv/
+.pytest_cache/
