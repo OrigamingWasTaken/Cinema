@@ -31,7 +31,10 @@ tar --anchored \
   | ssh "$TARGET" "mkdir -p '$REMOTE_DIR' && tar -xzf - -C '$REMOTE_DIR'"
 
 # Quote each service name for the remote shell (never splice raw "$*").
-SERVICE_ARGS=$(printf '%q ' "$@")
+SERVICE_ARGS=""
+if [ "$#" -gt 0 ]; then
+  SERVICE_ARGS=$(printf '%q ' "$@")
+fi
 
 sed -n 2p creds.txt | tr -d '\r' \
   | ssh "$TARGET" "cd '$REMOTE_DIR' && sudo -S -p '' $REMOTE_DOCKER compose up -d --build --no-deps $SERVICE_ARGS"
