@@ -6,6 +6,7 @@ requested pieces have arrived.
 """
 import base64
 import binascii
+import re
 import secrets
 import xml.etree.ElementTree as ET
 from contextlib import AsyncExitStack
@@ -35,6 +36,7 @@ CONTENT_TYPES = {
 # Every method a WebDAV client might send, so unsupported ones get 405, not a router 404/405 mix.
 METHODS = ["GET", "HEAD", "OPTIONS", "PROPFIND", "PUT", "POST", "DELETE", "PATCH",
            "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"]
+SUFFIX_RANGE = re.compile(r"bytes=-(\d+)")
 PROXY_TIMEOUT = httpx.Timeout(10, read=None)
 
 ET.register_namespace("D", DAV_NS)
@@ -211,7 +213,16 @@ def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
             return Response(status_code=200, headers={**base, "Content-Length": str(f.size)})
         upstream_headers = {}
         if "range" in request.headers:
-            upstream_headers["Range"] = request.headers["range"]
+            rng = request.headers["range"]
+            # rqbit ignores suffix ranges (answers 200 from byte 0), so make them absolute.
+            suffix = SUFFIX_RANGE.fullmatch(rng.strip())
+            if suffix:
+                n = int(suffix.group(1))
+                if n == 0:
+                    return Response(status_code=416,
+                                    headers={**base, "Content-Range": f"bytes */{f.size}"})
+                rng = f"bytes={max(0, f.size - n)}-{f.size - 1}"
+            upstream_headers["Range"] = rng
         url = rqbit.stream_url(f.movie.torrent_id, f.movie.file_index)
         stack = AsyncExitStack()
         try:

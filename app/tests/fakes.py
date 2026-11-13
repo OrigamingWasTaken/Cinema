@@ -139,8 +139,10 @@ class FakeRqbit:
         if not m or (m.group(1) == "" and m.group(2) == ""):
             return httpx.Response(416, headers={"Content-Range": f"bytes */{size}"})
         if m.group(1) == "":
-            n = int(m.group(2))
-            start, end = max(size - n, 0), size - 1
+            # Like real rqbit 9.0.1: suffix ranges are ignored, full body from byte 0.
+            body = full[:avail]
+            return httpx.Response(200, headers={**headers, "Content-Length": str(len(body))},
+                                  stream=_TrackedStream(body, self, key))
         else:
             start = int(m.group(1))
             end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1

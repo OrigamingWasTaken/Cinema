@@ -196,6 +196,54 @@ def test_dav_range_variants(env, kind):
     assert r.status_code == 416
 
 
+def test_proxy_suffix_range_is_rewritten_to_absolute(env):
+    env.add_downloading()
+    r = env.client().get("/dav/Movies/Sintel (2010)/Sintel (2010).mkv",
+                         headers={"Range": "bytes=-500"})
+    assert r.status_code == 206
+    assert r.content == CONTENT[-500:]
+    assert r.headers["content-range"] == f"bytes {SIZE - 500}-{SIZE - 1}/{SIZE}"
+    assert env.fake.requests[-1]["headers"]["range"] == f"bytes={SIZE - 500}-{SIZE - 1}"
+
+
+def test_proxy_suffix_larger_than_file_returns_whole_file(env):
+    env.add_downloading()
+    r = env.client().get("/dav/Movies/Sintel (2010)/Sintel (2010).mkv",
+                         headers={"Range": f"bytes=-{SIZE * 2}"})
+    assert r.status_code == 206
+    assert r.content == CONTENT
+    assert r.headers["content-range"] == f"bytes 0-{SIZE - 1}/{SIZE}"
+    assert env.fake.requests[-1]["headers"]["range"] == f"bytes=0-{SIZE - 1}"
+
+
+def test_proxy_zero_suffix_is_416_answered_locally(env):
+    env.add_downloading()
+    r = env.client().get("/dav/Movies/Sintel (2010)/Sintel (2010).mkv",
+                         headers={"Range": "bytes=-0"})
+    assert r.status_code == 416
+    assert r.headers["content-range"] == f"bytes */{SIZE}"
+    assert not env.fake.requests
+
+
+def test_proxy_passes_other_range_forms_through_unchanged(env):
+    env.add_downloading()
+    c = env.client()
+    url = "/dav/Movies/Sintel (2010)/Sintel (2010).mkv"
+    for rng in ("bytes=5-", "bytes=0-1,5-9", "bytes=abc"):
+        c.get(url, headers={"Range": rng})
+        assert env.fake.requests[-1]["headers"]["range"] == rng
+
+
+def test_fake_rqbit_ignores_suffix_ranges_like_real_rqbit(env):
+    async def go():
+        async with httpx.AsyncClient(transport=env.fake.transport) as h:
+            return await h.get("http://rqbit/torrents/0/stream/0", headers={"Range": "bytes=-500"})
+    r = asyncio.run(go())
+    assert r.status_code == 200
+    assert "content-range" not in r.headers
+    assert r.content == CONTENT
+
+
 def drive_disconnect(app, path):
     """Run the ASGI app, delivering http.disconnect right after the first body chunk."""
     sent: list[dict] = []
