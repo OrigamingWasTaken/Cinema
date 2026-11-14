@@ -14,6 +14,10 @@ TRACKERS = (
 )
 
 
+SEARCH_TIMEOUT = 60.0  # Prowlarr waits for all of its indexers
+RESOLVE_TIMEOUT = 30.0
+
+
 class ProwlarrError(Exception):
     pass
 
@@ -52,6 +56,7 @@ class ProwlarrClient:
                 f"{self._base}/api/v1/search",
                 params={"query": query, "type": "movie", "categories": 2000, "limit": 100},
                 headers={"X-Api-Key": self._key},
+                timeout=SEARCH_TIMEOUT,
             )
         except httpx.HTTPError as e:
             raise ProwlarrError(f"prowlarr unreachable: {type(e).__name__}") from None
@@ -86,7 +91,8 @@ class ProwlarrClient:
         """Follow the download link; any failure raises ProwlarrError without the URL."""
         for hop in range(2):
             try:
-                resp = await self._http.get(url, follow_redirects=False)
+                resp = await self._http.get(url, follow_redirects=False,
+                                          timeout=RESOLVE_TIMEOUT)
             except httpx.HTTPError as e:
                 raise ProwlarrError(f"prowlarr download failed: {type(e).__name__}") from None
             if 300 <= resp.status_code < 400:

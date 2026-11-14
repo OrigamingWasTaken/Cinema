@@ -13,6 +13,10 @@ def _eta_secs(remaining) -> int | None:
     return int(secs) if secs is not None else None
 
 
+# Magnet metadata over DHT can take tens of seconds.
+METADATA_TIMEOUT = 120.0
+
+
 class RqbitError(Exception):
     def __init__(self, status: int | None, text: str):
         super().__init__(f"rqbit error {status}: {text}")
@@ -96,7 +100,8 @@ class RqbitClient:
 
     async def list_files(self, source: TorrentSource) -> AddedTorrent:
         resp = await self._request(
-            "POST", "/torrents", params={"list_only": "true"}, content=self._body(source)
+            "POST", "/torrents", params={"list_only": "true"}, content=self._body(source),
+            timeout=METADATA_TIMEOUT,
         )
         return _parse_added(resp.json())
 
@@ -106,7 +111,7 @@ class RqbitClient:
             "POST", "/torrents",
             params={"overwrite": "true", "only_files": str(only_file),
                     "output_folder": output_folder},
-            content=self._body(source),
+            content=self._body(source), timeout=METADATA_TIMEOUT,
         )
         added = _parse_added(resp.json())
         if added.id is None:

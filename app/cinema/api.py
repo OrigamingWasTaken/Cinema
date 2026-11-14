@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import hashlib
 import shutil
 import time
@@ -21,6 +22,7 @@ from cinema.rqbit import RqbitClient, RqbitError
 from cinema.store import Movie, Store
 from cinema.tmdb import MovieCard, TmdbClient, TmdbError
 
+log = logging.getLogger(__name__)
 RELEASE_TTL = 600.0
 # A malformed upstream payload surfaces as one of these from a client; treat it as that
 # service being down rather than a 500.
@@ -34,11 +36,19 @@ class UpstreamError(Exception):
         self.service = service
 
 
+class NotFoundError(Exception):
+    pass
+
+
 class DownloadRequest(BaseModel):
     release_id: str
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(NotFoundError)
+    async def _not_found(_, exc: NotFoundError):
+        return JSONResponse({"error": "not_found"}, status_code=404)
+
     @app.exception_handler(UpstreamError)
     async def _upstream(_, exc: UpstreamError):
         return JSONResponse({"error": "upstream", "service": exc.service}, status_code=502)
@@ -49,7 +59,19 @@ async def _call(service: str, errors: tuple[type[Exception], ...],
     try:
         return await awaitable
     except (*errors, *_MALFORMED) as exc:
+        if isinstance(exc, TmdbError) and exc.status == 404:
+            raise NotFoundError() from exc
+        log.warning("%s failed: %s", service, exc)
         raise UpstreamError(service) from exc
+
+
+async def _rqbit(awaitable: Awaitable[T]) -> T:
+    # Only rqbit's own failures are 502; a bug in our code must surface as a 500.
+    try:
+        return await awaitable
+    except RqbitError as exc:
+        log.warning("rqbit failed: %s", exc)
+        raise UpstreamError("rqbit") from exc
 
 
 def release_id(release: Release) -> str:
@@ -109,7 +131,8 @@ def build_api_router(settings: Settings, store: Store, rqbit: RqbitClient,
         try:
             trending = [_card(c, store) for c in await _call("tmdb", (TmdbError,), tmdb.trending())]
             popular = [_card(c, store) for c in await _call("tmdb", (TmdbError,), tmdb.popular())]
-        except UpstreamError:
+        except (UpstreamError, NotFoundError) as exc:
+            log.warning("catalog unavailable: %s", type(exc).__name__)
             trending, popular, catalog_error = [], [], True
         body = {
             "library": [_library_item(m) for m in store.all()],
@@ -177,9 +200,8 @@ def build_api_router(settings: Settings, store: Store, rqbit: RqbitClient,
             source = await _call("prowlarr", (ProwlarrError,), prowlarr.resolve(release))
             try:
                 if existing is not None:
-                    await _call("rqbit", (RqbitError,),
-                                remove_movie(store, rqbit, settings.movies_dir, tmdb_id))
-                movie = await _call("rqbit", (RqbitError,), start_download(
+                    await _rqbit(remove_movie(store, rqbit, settings.movies_dir, tmdb_id))
+                movie = await _rqbit(start_download(
                     store, rqbit, settings.movies_dir, tmdb_id=tmdb_id, title=info.title,
                     year=info.year, poster_path=info.poster_path, runtime_min=info.runtime,
                     release_name=release.title, source=source))
@@ -192,8 +214,7 @@ def build_api_router(settings: Settings, store: Store, rqbit: RqbitClient,
     @router.delete("/movies/{tmdb_id}", status_code=204)
     async def delete_movie(tmdb_id: int):
         async with lock_for(tmdb_id):
-            await _call("rqbit", (RqbitError,),
-                        remove_movie(store, rqbit, settings.movies_dir, tmdb_id))
+            await _rqbit(remove_movie(store, rqbit, settings.movies_dir, tmdb_id))
         return Response(status_code=204)
 
     return router

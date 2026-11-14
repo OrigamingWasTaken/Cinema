@@ -10,7 +10,9 @@ SEARCH_TTL = 600.0
 
 
 class TmdbError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -63,7 +65,7 @@ class TmdbClient:
         except httpx.HTTPError as exc:
             raise TmdbError(f"tmdb unreachable: {exc}") from exc
         if not resp.is_success:
-            raise TmdbError(f"tmdb error {resp.status_code}: {resp.text[:200]}")
+            raise TmdbError(f"tmdb error {resp.status_code}: {resp.text[:200]}", resp.status_code)
         try:
             return resp.json()
         except ValueError as exc:

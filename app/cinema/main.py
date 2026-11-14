@@ -22,7 +22,7 @@ def create_app(settings: Settings, *, store: Store | None = None,
                clock: Callable[[], float] = time.monotonic) -> FastAPI:
     owned_http: httpx.AsyncClient | None = None
     if rqbit is None or tmdb is None or prowlarr is None:
-        owned_http = httpx.AsyncClient()
+        owned_http = httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5))
     if rqbit is None:
         rqbit = RqbitClient(settings.rqbit_url, owned_http)
     if tmdb is None:

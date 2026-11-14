@@ -51,13 +51,24 @@ def prowlarr_handler(request):
     return httpx.Response(200, json=prowlarr_items())
 
 
-def build(settings, tmp_path, tmdb=tmdb_handler, prowlarr=prowlarr_handler, clock=None):
+def yielding(handler):
+    """Make a mock upstream really await, so concurrent requests interleave."""
+    async def slow(request):
+        await asyncio.sleep(0.01)
+        result = handler(request)
+        return await result if asyncio.iscoroutine(result) else result
+    return httpx.MockTransport(slow)
+
+
+def build(settings, tmp_path, tmdb=tmdb_handler, prowlarr=prowlarr_handler, clock=None,
+          rqbit_handler=None):
     fake = FakeRqbit(FILES)
     store = Store(tmp_path / "api.db")
-    rqbit = RqbitClient("http://rqbit:3030", httpx.AsyncClient(transport=fake.transport))
-    t = TmdbClient("t", "en-US", httpx.AsyncClient(transport=httpx.MockTransport(tmdb)))
+    rqbit = RqbitClient("http://rqbit:3030", httpx.AsyncClient(
+        transport=yielding(rqbit_handler or fake._handle)))
+    t = TmdbClient("t", "en-US", httpx.AsyncClient(transport=yielding(tmdb)))
     p = ProwlarrClient("http://prowlarr:9696", "k",
-                       httpx.AsyncClient(transport=httpx.MockTransport(prowlarr)))
+                       httpx.AsyncClient(transport=yielding(prowlarr)))
     kwargs = {"clock": clock} if clock else {}
     app = create_app(settings, store=store, rqbit=rqbit, tmdb=t, prowlarr=p,
                      start_poller=False, **kwargs)
@@ -121,7 +132,7 @@ async def test_releases_recommended_and_groups(settings, tmp_path):
     client, _, _ = build(settings, tmp_path)
     body = (await client.get("/api/movies/693134/releases")).json()
     rec = body["recommended"]
-    assert rec["resolution"] in {1080, 1440, 2160} and rec["source"] in {"bluray", "web"}
+    assert rec["resolution"] == 1440 and rec["source"] in {"bluray", "web"}
     assert body["groups"] and body["groups"][0]["resolution"] > body["groups"][-1]["resolution"]
     assert all(set(g) == {"resolution", "standard", "atmos"} for g in body["groups"])
     ids = {v["id"] for g in body["groups"] for v in g["standard"] + g["atmos"]}
@@ -228,3 +239,34 @@ async def test_delete_removes(settings, tmp_path):
     resp = await client.delete("/api/movies/693134")
     assert resp.status_code == 204
     assert store.get(693134) is None and fake.torrents[0]["deleted"] is True
+
+
+@pytest.mark.anyio
+async def test_search_tmdb_down_is_502(settings, tmp_path):
+    client, _, _ = build(settings, tmp_path, tmdb=lambda r: httpx.Response(500, text="x"))
+    resp = await client.get("/api/search", params={"q": "dune"})
+    assert resp.status_code == 502
+    assert resp.json() == {"error": "upstream", "service": "tmdb"}
+
+
+@pytest.mark.anyio
+async def test_download_rqbit_failure_is_502(settings, tmp_path):
+    client, store, _ = build(settings, tmp_path,
+                             rqbit_handler=lambda r: httpx.Response(500, text="boom"))
+    rid = await recommended_id(client)
+    resp = await client.post("/api/movies/693134/download", json={"release_id": rid})
+    assert resp.status_code == 502
+    assert resp.json() == {"error": "upstream", "service": "rqbit"}
+    assert store.get(693134) is None
+
+
+@pytest.mark.anyio
+async def test_unknown_movie_is_404(settings, tmp_path):
+    client, _, _ = build(settings, tmp_path,
+                         tmdb=lambda r: httpx.Response(404, json={"success": False}))
+    for path in ("/api/movies/1", "/api/movies/1/releases"):
+        resp = await client.get(path)
+        assert resp.status_code == 404 and resp.json() == {"error": "not_found"}
+    home = await client.get("/api/home")
+    assert home.status_code == 200 and home.json()["catalog_error"] is True
+
