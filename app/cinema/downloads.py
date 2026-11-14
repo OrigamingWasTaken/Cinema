@@ -98,6 +98,9 @@ async def _refresh_one(store: Store, rqbit: RqbitClient, m: Movie, now: float,
     )
     if s.finished:
         store.upsert(replace(updated, status="done", download_bps=0.0, eta_s=None))
+    elif s.state == "error":
+        log.warning("torrent %s for movie %s errored in rqbit", current.torrent_id, current.tmdb_id)
+        await _fail(store, rqbit, updated)
     elif s.state == "live" and s.live_peers == 0 and _stalled(updated, now, watch_started):
         await _fail(store, rqbit, updated)
     else:

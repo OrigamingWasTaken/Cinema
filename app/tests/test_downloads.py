@@ -98,6 +98,14 @@ async def test_refresh_marks_stalled_failed(store):
 
 
 @pytest.mark.anyio
+async def test_refresh_rqbit_error_state_is_failed(store):
+    store.upsert(movie())
+    rq = StubRqbit({1: stats(state="error", error="disk full", live_peers=0)})
+    await refresh(store, rq, now=1001.0)
+    assert store.get(1).status == "failed"
+
+
+@pytest.mark.anyio
 async def test_refresh_failed_pause_error_is_ignored(store):
     store.upsert(movie())
     rq = StubRqbit({1: stats(live_peers=0)}, pause_error=RqbitError(500, "busy"))
