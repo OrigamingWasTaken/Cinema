@@ -1,0 +1,197 @@
+[
+  {
+    "title": "Dune.Part.Two.2024.1080p.BluRay.x264-SPARKS",
+    "size_gb": 14.5,
+    "seeders": 420,
+    "expect": {
+      "resolution": 1080,
+      "source": "bluray",
+      "atmos": false,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-FLUX",
+    "size_gb": 9.8,
+    "seeders": 800,
+    "expect": {
+      "resolution": 1080,
+      "source": "webdl",
+      "atmos": true,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.2160p.UHD.BluRay.x265.10bit.HDR.TrueHD.7.1.Atmos-SWTYBLZ",
+    "size_gb": 62.0,
+    "seeders": 90,
+    "expect": {
+      "resolution": 2160,
+      "source": "bluray",
+      "atmos": true,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.1080p.BluRay.REMUX.AVC.TrueHD.7.1.Atmos-FGT",
+    "size_gb": 38.0,
+    "seeders": 150,
+    "expect": {
+      "resolution": 1080,
+      "source": "remux",
+      "atmos": true,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.HDCAM.x264-NoGroup",
+    "size_gb": 1.5,
+    "seeders": 30,
+    "expect": {
+      "resolution": null,
+      "source": "other",
+      "atmos": false,
+      "lang": "original",
+      "is_cam": true,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.1080p.BluRay.x264.AAC5.1-[YTS.MX]",
+    "size_gb": 2.9,
+    "seeders": 2000,
+    "expect": {
+      "resolution": 1080,
+      "source": "bluray",
+      "atmos": false,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.MULTi.1080p.BluRay.x264-QTZ",
+    "size_gb": 12.0,
+    "seeders": 60,
+    "expect": {
+      "resolution": 1080,
+      "source": "bluray",
+      "atmos": false,
+      "lang": "multi",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.FRENCH.1080p.WEB.H264-FW",
+    "size_gb": 5.5,
+    "seeders": 40,
+    "expect": {
+      "resolution": 1080,
+      "source": "webdl",
+      "atmos": false,
+      "lang": "french_only",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.2160p.WEB-DL.DV.H265-XYZ",
+    "size_gb": 18.0,
+    "seeders": 70,
+    "expect": {
+      "resolution": 2160,
+      "source": "webdl",
+      "atmos": false,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": true
+    }
+  },
+  {
+    "title": "Dune.Part.Two.2024.1440p.WEB-DL.DDP5.1.H.264-GRP",
+    "size_gb": 11.0,
+    "seeders": 25,
+    "expect": {
+      "resolution": 1440,
+      "source": "webdl",
+      "atmos": false,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Anatomie.d.une.chute.2023.FRENCH.1080p.BluRay.x264-UTT",
+    "size_gb": 10.0,
+    "seeders": 35,
+    "expect": {
+      "resolution": 1080,
+      "source": "bluray",
+      "atmos": false,
+      "lang": "french_only",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Anatomy.of.a.Fall.2023.1080p.BluRay.x264-JustWatch",
+    "size_gb": 9.0,
+    "seeders": 80,
+    "expect": {
+      "resolution": 1080,
+      "source": "bluray",
+      "atmos": false,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Parasite.2019.KOREAN.1080p.BluRay.x264.DTS-FGT",
+    "size_gb": 12.0,
+    "seeders": 150,
+    "expect": {
+      "resolution": 1080,
+      "source": "bluray",
+      "atmos": false,
+      "lang": "original",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Parasite.2019.1080p.BluRay.x264.DUBBED-GRP",
+    "size_gb": 8.0,
+    "seeders": 20,
+    "expect": {
+      "resolution": 1080,
+      "source": "bluray",
+      "atmos": false,
+      "lang": "dubbed",
+      "is_cam": false,
+      "dv_only": false
+    }
+  },
+  {
+    "title": "Parasite.2019.VOSTFR.1080p.WEB.H264-GRP",
+    "size_gb": 4.0,
+    "seeders": 15,
+    "expect": {
+      "resolution": 1080,
+      "source": "webdl",
+      "atmos": false,
+      "lang": "french_subs",
+      "is_cam": false,
+      "dv_only": false
+    }
+  }
+]
