@@ -1,6 +1,9 @@
+import contextlib
+import io
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 def write_env(path, extra=None, omit=()):
@@ -49,7 +52,7 @@ class TestEnvConfig(unittest.TestCase):
             env_path = os.path.join(d, ".env")
             write_env(env_path, omit=("TMDB_TOKEN",))
             from setup import EnvConfig
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
                 EnvConfig(env_path)
 
     def test_empty_tmdb_token_rejected(self):
@@ -57,7 +60,7 @@ class TestEnvConfig(unittest.TestCase):
             env_path = os.path.join(d, ".env")
             write_env(env_path, {"TMDB_TOKEN": ""})
             from setup import EnvConfig
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
                 EnvConfig(env_path)
 
     def test_strips_comments_and_whitespace(self):
@@ -131,6 +134,37 @@ class TestMigrate(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(cfg, "prowlarr", "config.xml")))
 
 
+    def test_migrate_failure_leaves_no_config_xml_and_exits(self):
+        from setup import migrate_prowlarr_config
+        with tempfile.TemporaryDirectory() as root:
+            v1 = self._v1(root)
+            with open(os.path.join(v1, "prowlarr", "other.db"), "w") as f:
+                f.write("x")
+            cfg = os.path.join(root, "config")
+            os.makedirs(os.path.join(cfg, "prowlarr"))
+            real = __import__("shutil").copyfile
+
+            def flaky(src, dst, *a, **k):
+                if os.path.basename(src) == "other.db":
+                    raise PermissionError("denied")
+                return real(src, dst, *a, **k)
+
+            out = io.StringIO()
+            with mock.patch("shutil.copyfile", side_effect=flaky), \
+                    contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                migrate_prowlarr_config(v1, cfg)
+            self.assertFalse(os.path.exists(os.path.join(cfg, "prowlarr", "config.xml")))
+            self.assertIn("sudo python3 setup.py", out.getvalue())
+
+    def test_migrate_false_when_source_has_no_config_xml(self):
+        from setup import migrate_prowlarr_config
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "v1", "prowlarr"))
+            cfg = os.path.join(root, "config")
+            os.makedirs(os.path.join(cfg, "prowlarr"))
+            self.assertFalse(migrate_prowlarr_config(os.path.join(root, "v1"), cfg))
+
+
 class TestPlans(unittest.TestCase):
     def test_plan_adds_proxy_and_removes_radarr(self):
         from setup import plan_prowlarr_changes
@@ -181,6 +215,92 @@ class TestProwlarrConfigurator(unittest.TestCase):
                 ProwlarrConfigurator.read_api_key(config_xml)
 
 
+class TestConfigure(unittest.TestCase):
+    def _configurator(self, indexers, fail_path=None, fail_name=None):
+        import setup
+        cfg = setup.ProwlarrConfigurator.__new__(setup.ProwlarrConfigurator)
+        cfg.api_key = "k"
+        calls = []
+        schemas = [{"name": n, "implementation": n} for n in setup.DEFAULT_INDEXERS]
+
+        def fake(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "POST" and fail_name and body and body.get("name") == fail_name:
+                raise OSError("boom")
+            if (method, path) == ("GET", "/system/status"):
+                return {}
+            if (method, path) == ("GET", "/indexerProxy"):
+                return []
+            if (method, path) == ("GET", "/applications"):
+                return [{"id": 5, "implementation": "Radarr"}]
+            if (method, path) == ("GET", "/tag"):
+                return []
+            if (method, path) == ("POST", "/tag"):
+                return {"id": 9}
+            if (method, path) == ("GET", "/indexer"):
+                return indexers
+            if (method, path) == ("GET", "/indexer/schema"):
+                return schemas
+            return None
+
+        cfg._request = fake
+        return cfg, calls
+
+    def test_configure_applies_plan(self):
+        cfg, calls = self._configurator([])
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.configure()
+        proxy = [c for c in calls if c[1] == "/indexerProxy?forceSave=true"]
+        self.assertEqual(len(proxy), 1)
+        self.assertEqual(proxy[0][0], "POST")
+        self.assertEqual(proxy[0][2]["tags"], [9])
+        self.assertIn(("DELETE", "/applications/5", None), calls)
+        posted = [c[2] for c in calls if c[1] == "/indexer?forceSave=true"]
+        self.assertEqual([p["name"] for p in posted] if "name" in posted[0] else
+                         [p["implementation"] for p in posted],
+                         ["The Pirate Bay", "YTS", "Knaben"])
+        for p in posted:
+            self.assertIs(p["enable"], True)
+            self.assertEqual(p["appProfileId"], 1)
+            self.assertEqual(p["priority"], 25)
+            self.assertEqual(p["tags"], [])
+
+    def test_configure_skips_indexers_when_any_exist(self):
+        cfg, calls = self._configurator([{"id": 1, "name": "YTS"}])
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.configure()
+        self.assertFalse([c for c in calls if c[1].startswith("/indexer?")])
+
+    def test_failing_indexer_warns_and_continues(self):
+        cfg, calls = self._configurator([], fail_name="YTS")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cfg.configure()
+        self.assertEqual(len([c for c in calls if c[1] == "/indexer?forceSave=true"]), 3)
+        self.assertIn("WARNING: could not add indexer YTS", out.getvalue())
+
+    def test_missing_schema_warns(self):
+        import setup
+        cfg, calls = self._configurator([])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cfg._add_indexers(["Nope"])
+        self.assertIn("Nope not in Prowlarr schema", out.getvalue())
+
+    def test_wait_until_ready_retries(self):
+        import setup
+        cfg = setup.ProwlarrConfigurator.__new__(setup.ProwlarrConfigurator)
+        attempts = []
+
+        def fake(method, path, body=None):
+            attempts.append(path)
+            if len(attempts) < 3:
+                raise OSError("down")
+
+        cfg._request = fake
+        cfg.wait_until_ready(timeout=5, interval=0)
+        self.assertEqual(len(attempts), 3)
+
+
 class TestHelpers(unittest.TestCase):
     def test_constants(self):
         import setup
@@ -189,7 +309,6 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(setup.StackLauncher.HEALTH_PORTS, {"prowlarr": 9696, "cinema": 8888})
 
     def test_docker_bin_falls_back(self):
-        from unittest import mock
         import setup
         with mock.patch("shutil.which", return_value=None):
             self.assertEqual(setup.docker_bin(), "/usr/local/bin/docker")

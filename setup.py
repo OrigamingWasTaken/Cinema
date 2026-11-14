@@ -66,16 +66,27 @@ class DirectorySetup:
 
 
 def migrate_prowlarr_config(v1_config_path: Optional[str], config_path: str) -> bool:
-    """Copy the v1 Prowlarr folder into the v2 config unless it already has a config.xml."""
+    """Copy the v1 Prowlarr folder into the v2 config unless it already has a config.xml.
+
+    config.xml is copied last, so a present config.xml means the copy completed.
+    """
     if not v1_config_path:
         return False
     source = os.path.join(v1_config_path, "prowlarr")
     target = os.path.join(config_path, "prowlarr")
-    if not os.path.isdir(source):
+    source_xml = os.path.join(source, "config.xml")
+    if not os.path.isfile(source_xml):
         return False
     if os.path.exists(os.path.join(target, "config.xml")):
         return False
-    shutil.copytree(source, target, dirs_exist_ok=True)
+    try:
+        shutil.copytree(source, target, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("config.xml"))
+        shutil.copy2(source_xml, os.path.join(target, "config.xml"))
+    except (shutil.Error, OSError) as e:
+        print(f"Could not copy the v1 Prowlarr files ({e}).")
+        print("They are not readable by this user; re-run as: sudo python3 setup.py")
+        sys.exit(1)
     return True
 
 
@@ -152,8 +163,10 @@ class StackLauncher:
         print("  prowlarr: auth set to Forms (disabled for local addresses)")
 
         print("  Restarting Prowlarr to apply auth config...")
-        subprocess.run(["sudo", docker_bin(), "restart", "prowlarr"],
-                       capture_output=True, text=True)
+        result = subprocess.run(["sudo", docker_bin(), "restart", "prowlarr"],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  WARNING: restarting Prowlarr failed:\n{result.stderr}")
 
 
 def plan_prowlarr_changes(proxies: list, applications: list) -> tuple:
@@ -200,7 +213,21 @@ class ProwlarrConfigurator:
                 return tag["id"]
         return self._request("POST", "/tag", {"label": "flaresolverr"})["id"]
 
+    def wait_until_ready(self, timeout: int = 60, interval: float = 3):
+        """Poll /system/status: docker-proxy accepts TCP before the app is up."""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                self._request("GET", "/system/status")
+                return
+            except Exception as e:
+                if time.time() >= deadline:
+                    print(f"  WARNING: Prowlarr API not ready after {timeout}s: {e}")
+                    return
+                time.sleep(interval)
+
     def configure(self):
+        self.wait_until_ready()
         proxies = self._request("GET", "/indexerProxy")
         applications = self._request("GET", "/applications")
         add_proxy, remove_ids = plan_prowlarr_changes(proxies, applications)
@@ -241,7 +268,10 @@ class ProwlarrConfigurator:
         schemas = self._request("GET", "/indexer/schema")
         for name in wanted:
             try:
-                schema = next(s for s in schemas if s.get("name") == name)
+                schema = next((s for s in schemas if s.get("name") == name), None)
+                if schema is None:
+                    print(f"  WARNING: {name} not in Prowlarr schema")
+                    continue
                 schema = dict(schema, enable=True, appProfileId=1, priority=25, tags=[])
                 self._request("POST", "/indexer?forceSave=true", schema)
                 print(f"  Indexer added: {name}")
