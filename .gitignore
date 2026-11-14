@@ -5,3 +5,6 @@ __pycache__/
 creds.txt
 app/.venv/
 .pytest_cache/
+app/web/node_modules/
+# Built by `npm run build` in app/web (and by the Docker image); never committed.
+app/cinema/static/
