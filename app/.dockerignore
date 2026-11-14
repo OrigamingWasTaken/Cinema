@@ -1,0 +1,7 @@
+# Local tooling and build output; the image installs and builds its own.
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+web/node_modules
+cinema/static

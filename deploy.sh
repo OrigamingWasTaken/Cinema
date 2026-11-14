@@ -22,9 +22,12 @@ fi
 
 # tar is run from "." so member names start with "./"; the excludes below are
 # anchored to the repo root. __pycache__ and .pytest_cache are excluded at any depth.
+# The phone app is built inside the Docker image, so local node_modules and build
+# output (app/cinema/static) stay behind.
 tar --anchored \
     --exclude=./.git --exclude=./app/.venv --exclude=./creds.txt --exclude=./.env \
     --exclude=./config --exclude=./.superpowers \
+    --exclude=./app/web/node_modules --exclude=./app/cinema/static \
     --no-anchored \
     --exclude=__pycache__ --exclude=.pytest_cache \
     -czf - . \
