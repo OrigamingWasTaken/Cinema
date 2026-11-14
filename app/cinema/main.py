@@ -2,9 +2,11 @@ import asyncio
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from cinema.api import build_api_router, register_error_handlers
 from cinema.config import Settings, load_settings
@@ -14,6 +16,17 @@ from cinema.rqbit import RqbitClient
 from cinema.store import Store
 from cinema.tmdb import TmdbClient
 from cinema.webdav import build_dav_router
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+class StaticApp(StaticFiles):
+    """The phone app; revalidated on every load so a redeploy shows up at once."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
 
 
 def create_app(settings: Settings, *, store: Store | None = None,
@@ -60,6 +73,8 @@ def create_app(settings: Settings, *, store: Store | None = None,
     auth = ((settings.dav_user, settings.dav_password)
             if settings.dav_user and settings.dav_password else None)
     app.include_router(build_dav_router(store, rqbit, rqbit.http, settings.legacy_dir, auth))
+    # Last: the catch-all mount must not shadow /api, /dav or /healthz.
+    app.mount("/", StaticApp(directory=STATIC_DIR, html=True), name="static")
 
     return app
 
