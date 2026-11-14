@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Cinema Stack — automated setup and configuration."""
+"""Cinema Stack v2 — automated setup and configuration (stdlib only)."""
 import json
 import os
-import re
+import shutil
+import socket
 import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
-from http.cookiejar import CookieJar
-from urllib.parse import urlencode
 from typing import Optional
 from urllib.request import Request, urlopen
 
 
-REQUIRED_KEYS = ["PUID", "PGID", "TZ", "DATA_PATH", "CONFIG_PATH", "QB_PASSWORD"]
+REQUIRED_KEYS = ["PUID", "PGID", "TZ", "DATA_PATH", "CONFIG_PATH", "TMDB_TOKEN"]
 
 
 class EnvConfig:
@@ -27,7 +26,7 @@ class EnvConfig:
                 key, _, value = line.partition("=")
                 values[key.strip()] = value.strip()
 
-        missing = [k for k in REQUIRED_KEYS if k not in values]
+        missing = [k for k in REQUIRED_KEYS if not values.get(k)]
         if missing:
             print(f"Missing required keys in {env_path}: {', '.join(missing)}")
             sys.exit(1)
@@ -37,12 +36,20 @@ class EnvConfig:
         self.tz = values["TZ"]
         self.data_path = values["DATA_PATH"]
         self.config_path = values["CONFIG_PATH"]
-        self.qb_password = values["QB_PASSWORD"]
+        self.tmdb_token = values["TMDB_TOKEN"]
+        self.v1_config_path = values.get("V1_CONFIG_PATH") or None
         self.all = values
 
 
-DATA_DIRS = ["torrents/movies", "media/movies"]
-CONFIG_SERVICES = ["qbittorrent", "radarr", "prowlarr", "flaresolverr"]
+DATA_DIRS = ["movies"]
+CONFIG_SERVICES = ["prowlarr", "rqbit/db", "rqbit/cache", "cinema"]
+
+DEFAULT_INDEXERS = ["The Pirate Bay", "YTS", "Knaben"]
+
+
+def docker_bin() -> str:
+    # Synology's non-interactive and sudo PATH lacks /usr/local/bin.
+    return shutil.which("docker") or "/usr/local/bin/docker"
 
 
 class DirectorySetup:
@@ -51,24 +58,34 @@ class DirectorySetup:
         self.config_path = config_path
 
     def create(self):
+        # Synology Docker refuses to create missing bind-mount directories.
         for d in DATA_DIRS:
             os.makedirs(os.path.join(self.data_path, d), exist_ok=True)
         for svc in CONFIG_SERVICES:
             os.makedirs(os.path.join(self.config_path, svc), exist_ok=True)
 
 
+def migrate_prowlarr_config(v1_config_path: Optional[str], config_path: str) -> bool:
+    """Copy the v1 Prowlarr folder into the v2 config unless it already has a config.xml."""
+    if not v1_config_path:
+        return False
+    source = os.path.join(v1_config_path, "prowlarr")
+    target = os.path.join(config_path, "prowlarr")
+    if not os.path.isdir(source):
+        return False
+    if os.path.exists(os.path.join(target, "config.xml")):
+        return False
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    return True
+
+
 class StackLauncher:
-    HEALTH_PORTS = {
-        "qbittorrent": 8080,
-        "radarr": 7878,
-        "prowlarr": 9696,
-        "flaresolverr": 8191,
-    }
+    HEALTH_PORTS = {"prowlarr": 9696, "cinema": 8888}
 
     def start(self):
         print("Starting Docker stack...")
         result = subprocess.run(
-            ["sudo", "docker", "compose", "up", "-d"],
+            ["sudo", docker_bin(), "compose", "up", "-d", "--build"],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -78,7 +95,6 @@ class StackLauncher:
 
     @staticmethod
     def _port_open(port: int) -> bool:
-        import socket
         try:
             with socket.create_connection(("localhost", port), timeout=2):
                 return True
@@ -99,21 +115,18 @@ class StackLauncher:
                 time.sleep(3)
 
         if pending:
-            print(f"Timed out waiting for: {', '.join(pending)}")
+            print(f"Timed out waiting for: {', '.join(sorted(pending))}")
             sys.exit(1)
         print("All services are ready.")
 
     @staticmethod
     def wait_for_config_files(config_path: str, timeout: int = 60):
-        files = [
-            os.path.join(config_path, "radarr", "config.xml"),
-            os.path.join(config_path, "prowlarr", "config.xml"),
-        ]
-        print("Waiting for services to generate config files...")
+        files = [os.path.join(config_path, "prowlarr", "config.xml")]
+        print("Waiting for Prowlarr to generate its config file...")
         start = time.time()
         while (time.time() - start) < timeout:
             if all(os.path.exists(f) for f in files):
-                print("  Config files found.")
+                print("  Config file found.")
                 return
             time.sleep(3)
         missing = [f for f in files if not os.path.exists(f)]
@@ -122,141 +135,45 @@ class StackLauncher:
 
     @staticmethod
     def configure_auth(config_path: str):
-        for svc in ["radarr", "prowlarr"]:
-            config_xml = os.path.join(config_path, svc, "config.xml")
-            tree = ET.parse(config_xml)
-            root = tree.getroot()
+        config_xml = os.path.join(config_path, "prowlarr", "config.xml")
+        tree = ET.parse(config_xml)
+        root = tree.getroot()
 
-            def set_or_create(tag: str, value: str):
-                el = root.find(tag)
-                if el is None:
-                    el = ET.SubElement(root, tag)
-                el.text = value
+        def set_or_create(tag: str, value: str):
+            el = root.find(tag)
+            if el is None:
+                el = ET.SubElement(root, tag)
+            el.text = value
 
-            set_or_create("AuthenticationMethod", "Forms")
-            set_or_create("AuthenticationRequired", "DisabledForLocalAddresses")
-            set_or_create("AuthenticationType", "forms")
-            tree.write(config_xml, xml_declaration=True, encoding="utf-8")
-            print(f"  {svc}: auth set to Forms (disabled for local addresses)")
+        set_or_create("AuthenticationMethod", "Forms")
+        set_or_create("AuthenticationRequired", "DisabledForLocalAddresses")
+        set_or_create("AuthenticationType", "forms")
+        tree.write(config_xml, xml_declaration=True, encoding="utf-8")
+        print("  prowlarr: auth set to Forms (disabled for local addresses)")
 
-        print("  Restarting Radarr and Prowlarr to apply auth config...")
-        subprocess.run(["sudo", "docker", "restart", "radarr", "prowlarr"],
+        print("  Restarting Prowlarr to apply auth config...")
+        subprocess.run(["sudo", docker_bin(), "restart", "prowlarr"],
                        capture_output=True, text=True)
 
 
-class QBittorrentConfigurator:
-    BASE_URL = "http://localhost:8080"
-
-    def __init__(self, new_password: str):
-        self.new_password = new_password
-        self.cookie_jar = CookieJar()
-
-    @staticmethod
-    def parse_temp_password(logs: str) -> str:
-        match = re.search(r"A temporary password is provided for this session: (\S+)", logs)
-        if not match:
-            raise ValueError("Could not find temporary password in qBittorrent logs")
-        return match.group(1)
-
-    def get_temp_password(self) -> str:
-        result = subprocess.run(
-            ["sudo", "docker", "logs", "qbittorrent"],
-            capture_output=True, text=True,
-        )
-        return self.parse_temp_password(result.stdout + result.stderr)
-
-    def _request(self, path: str, data: Optional[dict] = None) -> bytes:
-        url = f"{self.BASE_URL}/api/v2{path}"
-        body = urlencode(data).encode() if data else None
-        req = Request(url, data=body)
-        self.cookie_jar.add_cookie_header(req)
-        resp = urlopen(req, timeout=10)
-        self.cookie_jar.extract_cookies(resp, req)
-        return resp.read()
-
-    def login(self, password: str):
-        self._request("/auth/login", {"username": "admin", "password": password})
-
-    def configure(self):
-        temp_pw = self.get_temp_password()
-        self.login(temp_pw)
-
-        self._request("/app/setPreferences", {
-            "json": json.dumps({
-                "save_path": "/data/torrents/movies",
-                "upnp": False,
-                "web_ui_password": self.new_password,
-            })
-        })
-
-        self._request("/torrents/createCategory", {
-            "category": "movies",
-            "savePath": "/data/torrents/movies",
-        })
-
-        print("  qBittorrent configured (password set, save path, category created)")
+def plan_prowlarr_changes(proxies: list, applications: list) -> tuple:
+    """Return (add FlareSolverr proxy?, ids of stale Radarr applications to remove)."""
+    add_proxy = not any(p.get("implementation") == "FlareSolverr" for p in proxies)
+    remove_ids = [a["id"] for a in applications if a.get("implementation") == "Radarr"]
+    return add_proxy, remove_ids
 
 
-class RadarrConfigurator:
-    BASE_URL = "http://localhost:7878"
-
-    def __init__(self, config_path: str, qb_password: str):
-        config_xml = os.path.join(config_path, "radarr", "config.xml")
-        self.api_key = self.read_api_key(config_xml)
-        self.qb_password = qb_password
-
-    @staticmethod
-    def read_api_key(config_xml: str) -> str:
-        tree = ET.parse(config_xml)
-        el = tree.find("ApiKey")
-        if el is None or not el.text:
-            raise ValueError(f"No ApiKey found in {config_xml}")
-        return el.text
-
-    def _request(self, method: str, path: str, body: Optional[dict] = None):
-        url = f"{self.BASE_URL}/api/v3{path}"
-        data = json.dumps(body).encode() if body else None
-        req = Request(url, data=data, method=method)
-        req.add_header("X-Api-Key", self.api_key)
-        req.add_header("Content-Type", "application/json")
-        resp = urlopen(req, timeout=10)
-        content = resp.read()
-        return json.loads(content) if content else None
-
-    def configure(self):
-        self._request("POST", "/rootfolder", {"path": "/data/media/movies"})
-
-        self._request("POST", "/downloadclient", {
-            "name": "qBittorrent",
-            "implementation": "QBittorrent",
-            "protocol": "torrent",
-            "configContract": "QBittorrentSettings",
-            "fields": [
-                {"name": "host", "value": "qbittorrent"},
-                {"name": "port", "value": 8080},
-                {"name": "username", "value": "admin"},
-                {"name": "password", "value": self.qb_password},
-                {"name": "movieCategory", "value": "movies"},
-            ],
-            "enable": True,
-        })
-
-        naming = self._request("GET", "/config/naming")
-        naming["renameMovies"] = True
-        naming["standardMovieFormat"] = "{Movie CleanTitle} ({Release Year}) - {Quality Full}"
-        naming["movieFolderFormat"] = "{Movie CleanTitle} ({Release Year})"
-        self._request("PUT", "/config/naming", naming)
-
-        print("  Radarr configured (root folder, download client, naming)")
+def plan_indexers(indexers: list) -> list:
+    """Names of public indexers to add: only when Prowlarr has none at all."""
+    return [] if indexers else list(DEFAULT_INDEXERS)
 
 
 class ProwlarrConfigurator:
     BASE_URL = "http://localhost:9696"
 
-    def __init__(self, config_path: str, radarr_api_key: str):
+    def __init__(self, config_path: str):
         config_xml = os.path.join(config_path, "prowlarr", "config.xml")
         self.api_key = self.read_api_key(config_xml)
-        self.radarr_api_key = radarr_api_key
 
     @staticmethod
     def read_api_key(config_xml: str) -> str:
@@ -268,44 +185,77 @@ class ProwlarrConfigurator:
 
     def _request(self, method: str, path: str, body: Optional[dict] = None):
         url = f"{self.BASE_URL}/api/v1{path}"
-        data = json.dumps(body).encode() if body else None
+        data = json.dumps(body).encode() if body is not None else None
         req = Request(url, data=data, method=method)
         req.add_header("X-Api-Key", self.api_key)
         req.add_header("Content-Type", "application/json")
-        resp = urlopen(req, timeout=10)
+        # Generous timeout: forceSave calls can wait on slow upstreams.
+        resp = urlopen(req, timeout=60)
         content = resp.read()
         return json.loads(content) if content else None
 
+    def _flaresolverr_tag_id(self) -> int:
+        for tag in self._request("GET", "/tag"):
+            if tag["label"] == "flaresolverr":
+                return tag["id"]
+        return self._request("POST", "/tag", {"label": "flaresolverr"})["id"]
+
     def configure(self):
-        self._request("POST", "/tag", {"label": "flaresolverr"})
-        tags = self._request("GET", "/tag")
-        fs_tag_id = next(t["id"] for t in tags if t["label"] == "flaresolverr")
+        proxies = self._request("GET", "/indexerProxy")
+        applications = self._request("GET", "/applications")
+        add_proxy, remove_ids = plan_prowlarr_changes(proxies, applications)
 
-        self._request("POST", "/indexerproxy", {
-            "name": "FlareSolverr",
-            "implementation": "FlareSolverr",
-            "configContract": "FlareSolverrSettings",
-            "fields": [
-                {"name": "host", "value": "http://flaresolverr:8191"},
-                {"name": "requestTimeout", "value": 60},
-            ],
-            "tags": [fs_tag_id],
-        })
+        if add_proxy:
+            try:
+                tag_id = self._flaresolverr_tag_id()
+                # forceSave: validation solves a Cloudflare challenge via FlareSolverr,
+                # which can time out on the NAS and return 400.
+                self._request("POST", "/indexerProxy?forceSave=true", {
+                    "name": "FlareSolverr",
+                    "implementation": "FlareSolverr",
+                    "configContract": "FlareSolverrSettings",
+                    "fields": [
+                        {"name": "host", "value": "http://flaresolverr:8191/"},
+                        {"name": "requestTimeout", "value": 60},
+                    ],
+                    "tags": [tag_id],
+                })
+                print("  FlareSolverr proxy added")
+            except Exception as e:
+                print(f"  WARNING: could not add the FlareSolverr proxy: {e}")
+        else:
+            print("  FlareSolverr proxy already present")
 
-        self._request("POST", "/applications", {
-            "name": "Radarr",
-            "implementation": "Radarr",
-            "configContract": "RadarrSettings",
-            "syncLevel": "fullSync",
-            "fields": [
-                {"name": "prowlarrUrl", "value": "http://prowlarr:9696"},
-                {"name": "baseUrl", "value": "http://radarr:7878"},
-                {"name": "apiKey", "value": self.radarr_api_key},
-            ],
-            "tags": [],
-        })
+        for app_id in remove_ids:
+            try:
+                self._request("DELETE", f"/applications/{app_id}")
+                print(f"  Removed stale Radarr application {app_id}")
+            except Exception as e:
+                print(f"  WARNING: could not remove Radarr application {app_id}: {e}")
 
-        print("  Prowlarr configured (FlareSolverr proxy, Radarr application)")
+        wanted = plan_indexers(self._request("GET", "/indexer"))
+        if wanted:
+            self._add_indexers(wanted)
+
+    def _add_indexers(self, wanted: list):
+        schemas = self._request("GET", "/indexer/schema")
+        for name in wanted:
+            try:
+                schema = next(s for s in schemas if s.get("name") == name)
+                schema = dict(schema, enable=True, appProfileId=1, priority=25, tags=[])
+                self._request("POST", "/indexer?forceSave=true", schema)
+                print(f"  Indexer added: {name}")
+            except Exception as e:
+                print(f"  WARNING: could not add indexer {name}: {e}")
+
+
+def detect_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # no packet is sent
+            return s.getsockname()[0]
+    except OSError:
+        return "<NAS-IP>"
 
 
 def main():
@@ -316,9 +266,8 @@ def main():
     print("\n[Phase 1] Loading configuration...")
     if not os.path.exists(".env"):
         if os.path.exists(".env.example"):
-            import shutil
             print("No .env file found. Copying .env.example to .env")
-            print("Please edit .env with your values and re-run this script.")
+            print("Please edit .env with your values (incl. TMDB_TOKEN) and re-run this script.")
             shutil.copy(".env.example", ".env")
             sys.exit(0)
         else:
@@ -331,9 +280,11 @@ def main():
     print(f"  PUID:PGID = {config.puid}:{config.pgid}")
 
     print("\n[Phase 2] Creating directories...")
-    dirs = DirectorySetup(config.data_path, config.config_path)
-    dirs.create()
+    DirectorySetup(config.data_path, config.config_path).create()
     print("  Directories created.")
+
+    if migrate_prowlarr_config(config.v1_config_path, config.config_path):
+        print("  Copied the v1 Prowlarr config.")
 
     print("\n[Phase 3] Launching Docker stack...")
     launcher = StackLauncher()
@@ -346,36 +297,25 @@ def main():
     time.sleep(10)
     launcher.wait_for_healthy()
 
-    print("\n[Phase 4] Configuring services...")
+    print("\n[Phase 4] Configuring Prowlarr...")
+    ProwlarrConfigurator(config.config_path).configure()
 
-    print("  Configuring qBittorrent...")
-    qb = QBittorrentConfigurator(config.qb_password)
-    qb.configure()
-
-    print("  Configuring Radarr...")
-    radarr = RadarrConfigurator(config.config_path, config.qb_password)
-    radarr.configure()
-
-    print("  Configuring Prowlarr...")
-    prowlarr = ProwlarrConfigurator(config.config_path, radarr.api_key)
-    prowlarr.configure()
-
+    ip = detect_ip()
+    dav_user = config.all.get("DAV_USER")
     print("\n" + "=" * 50)
     print("Setup complete!")
     print("=" * 50)
-    print("\nService URLs (replace localhost with your Synology IP):")
-    print("  Radarr:       http://localhost:7878")
-    print("  Prowlarr:     http://localhost:9696")
-    print("  qBittorrent:  http://localhost:8080")
-    print("  FlareSolverr: http://localhost:8191")
-    print("\nqBittorrent credentials: admin / <your QB_PASSWORD from .env>")
-    print("\nRemaining manual steps:")
-    print("  1. Open Prowlarr and add torrent indexers (1337x, etc.)")
-    print(f"  2. On Apple TV: open Infuse -> add SMB share ->")
-    print(f"     point to {config.data_path}/media/movies")
-    print("  3. On iOS: install LunaSea, add Radarr server")
-    print("     (or use Radarr web UI in browser on any device)")
-    print("  4. Optional: adjust quality profiles in Radarr")
+    print(f"\n  Phones (family catalog): http://{ip}:8888")
+    print(f"  Prowlarr:                http://{ip}:9696")
+    print("\nInfuse on Apple TV:")
+    print("  1. Buy Infuse Pro (Family Sharing covers the household).")
+    print("  2. Add share -> WebDAV (not SMB):")
+    print(f"       address {ip}, port 8888, path /dav, name \"Cinema\"")
+    if dav_user:
+        print(f"       username {dav_user}, password = DAV_PASSWORD from .env")
+    else:
+        print("       leave username and password empty")
+    print("  3. Settings -> Subtitles: auto-download, English.")
 
 
 if __name__ == "__main__":
