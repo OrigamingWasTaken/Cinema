@@ -67,6 +67,17 @@ services:
     networks:
       - cinema
 
+  mdns:
+    build: ./mdns
+    container_name: cinema-mdns
+    environment:
+      - CINEMA_HOSTNAME=${CINEMA_HOSTNAME:-cinema.local}
+      - NAS_IP=${NAS_IP:-}
+    volumes:
+      - /var/run/dbus:/var/run/dbus
+    network_mode: host
+    restart: unless-stopped
+
 networks:
   cinema:
     driver: bridge

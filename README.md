@@ -80,6 +80,18 @@ It needs:
 - ssh key login: `ssh-copy-id user@NAS`. This fails unless DSM -> Control Panel
   -> User & Group -> Advanced -> **Enable user home service** is on.
 
+## Short address: http://cinema.local
+
+- The `mdns` service publishes `cinema.local` for the NAS through DSM's own
+  avahi (Bonjour). Override the name with `CINEMA_HOSTNAME`, or the IP with
+  `NAS_IP`, in `.env`.
+- To drop the `:8888`, add a DSM reverse proxy rule: Control Panel -> Login
+  Portal -> Advanced -> Reverse Proxy -> Create. Source: HTTP, hostname
+  `cinema.local`, port 80. Destination: HTTP, `localhost`, port 8888. Under
+  Advanced settings, set the read/send timeouts to 300 s (a download request
+  can take a few minutes).
+- Infuse keeps using port 8888 directly (WebDAV); the short address is for phones.
+
 ## Using it (family)
 
 1. Open the Cinema web app on the phone (`http://192.168.x.x:8888`) and add it
