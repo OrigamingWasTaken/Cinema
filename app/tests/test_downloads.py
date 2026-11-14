@@ -3,6 +3,8 @@ import logging
 import shutil
 import time
 
+from dataclasses import replace
+
 import httpx
 import pytest
 
@@ -32,9 +34,10 @@ def stats(**kw) -> TorrentStats:
 
 
 class StubRqbit:
-    def __init__(self, by_id=None, delete_error=None):
+    def __init__(self, by_id=None, delete_error=None, pause_error=None):
         self.by_id = by_id or {}
         self.delete_error = delete_error
+        self.pause_error = pause_error
         self.paused: list[int] = []
         self.deleted: list[int] = []
 
@@ -46,6 +49,8 @@ class StubRqbit:
 
     async def pause(self, tid):
         self.paused.append(tid)
+        if self.pause_error:
+            raise self.pause_error
 
     async def delete(self, tid):
         self.deleted.append(tid)
@@ -86,9 +91,65 @@ async def test_refresh_marks_stalled_failed(store):
     store.upsert(movie())
     rq = StubRqbit({1: stats(live_peers=0)})
     await refresh(store, rq, now=1000.0 + STALL_SECONDS)
-    assert store.get(1).status == "downloading"
+    assert store.get(1).status == "downloading" and rq.paused == []
     await refresh(store, rq, now=1000.0 + STALL_SECONDS + 1)
     assert store.get(1).status == "failed"
+    assert rq.paused == [1]  # a failed torrent stops downloading
+
+
+@pytest.mark.anyio
+async def test_refresh_failed_pause_error_is_ignored(store):
+    store.upsert(movie())
+    rq = StubRqbit({1: stats(live_peers=0)}, pause_error=RqbitError(500, "busy"))
+    await refresh(store, rq, now=1000.0 + STALL_SECONDS + 1)
+    assert store.get(1).status == "failed" and rq.paused == [1]
+
+
+@pytest.mark.anyio
+async def test_refresh_unknown_torrent_is_failed(store):
+    store.upsert(movie(1))
+    store.upsert(movie(2))
+    rq = StubRqbit({1: RqbitError(404, "torrent not found"), 2: RqbitError(None, "down")})
+    await refresh(store, rq, now=1100.0)
+    m = store.get(1)
+    assert m.status == "failed" and m.download_bps == 0 and m.eta_s is None
+    assert rq.paused == [1]
+    assert store.get(2).status == "downloading"  # rqbit unreachable: try again later
+
+
+@pytest.mark.anyio
+async def test_refresh_already_paused_finished_is_done_without_pause(store):
+    store.upsert(movie())
+    rq = StubRqbit({1: stats(state="paused", progress_bytes=4 * GB, finished=True,
+                             live_peers=0)})
+    await refresh(store, rq, now=1100.0)
+    assert rq.paused == [] and store.get(1).status == "done"
+
+
+@pytest.mark.anyio
+async def test_refresh_skips_row_readded_with_new_torrent_mid_flight(store):
+    store.upsert(movie(torrent_id=1))
+    readded = movie(torrent_id=9, progress_bytes=0, release_name="Other")
+
+    class ReaddingRqbit(StubRqbit):
+        async def stats(self, tid):
+            store.delete(1)  # removed and picked again while stats is in flight
+            store.upsert(readded)
+            return stats(progress_bytes=4 * GB, finished=True)
+
+    rq = ReaddingRqbit()
+    await refresh(store, rq, now=1100.0)
+    assert rq.paused == [] and store.get(1) == readded
+
+    class ReaddingUnknown(StubRqbit):
+        async def stats(self, tid):
+            store.upsert(replace(readded, torrent_id=10))
+            raise RqbitError(404, "gone")
+
+    store.upsert(movie(torrent_id=1))
+    rq = ReaddingUnknown()
+    await refresh(store, rq, now=1100.0)
+    assert rq.paused == [] and store.get(1).status == "downloading"
 
 
 @pytest.mark.anyio
@@ -240,21 +301,34 @@ async def test_remove_propagates_other_rqbit_errors_and_keeps_row(store, tmp_pat
 
 
 @pytest.mark.anyio
-async def test_remove_refuses_path_outside_movies_dir(store, tmp_path):
+async def test_remove_refuses_name_outside_movies_dir(store, tmp_path):
     movies = tmp_path / "movies"
     movies.mkdir()
-    outside = tmp_path / "other" / "Sintel (2010)"
-    outside.mkdir(parents=True)
-    (outside / "a.mkv").write_bytes(b"x")
-    sneaky = movies / ".." / "other" / "Sintel (2010)" / "a.mkv"
-    store.upsert(movie(1, file_path=str(sneaky)))
-    # file directly in movies_dir: must never rmtree movies_dir itself
     (movies / "b.mkv").write_bytes(b"x")
-    store.upsert(movie(2, file_path=str(movies / "b.mkv")))
+    # a title with no usable folder name must never rmtree movies_dir itself
+    store.upsert(movie(1, title="..", year=None, file_path=str(movies / "b.mkv")))
+    # a library folder that resolves outside movies_dir (symlink) is left alone
+    outside = tmp_path / "other"
+    outside.mkdir()
+    (outside / "a.mkv").write_bytes(b"x")
+    (movies / "Sintel (2010)").symlink_to(outside, target_is_directory=True)
+    store.upsert(movie(2, file_path=str(outside / "a.mkv")))
     for tid in (1, 2):
         await remove_movie(store, StubRqbit(), movies, tid)
         assert store.get(tid) is None
-    assert outside.exists() and (movies / "b.mkv").exists()
+    assert (movies / "b.mkv").exists() and (outside / "a.mkv").exists()
+
+
+@pytest.mark.anyio
+async def test_remove_uses_library_name_not_file_path(store, tmp_path):
+    movies, folder, _ = _library(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    stray = elsewhere / "x.mkv"
+    stray.write_bytes(b"x")
+    store.upsert(movie(file_path=str(stray)))
+    await remove_movie(store, StubRqbit(), movies, 1)
+    assert not folder.exists() and stray.exists() and movies.exists()
 
 
 def test_status_view_states_and_may_buffer():

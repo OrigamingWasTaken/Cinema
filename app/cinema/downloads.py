@@ -48,19 +48,48 @@ async def start_download(store: Store, rqbit: RqbitClient, movies_dir: Path, *,
     return movie
 
 
+def _still_downloading(store: Store, m: Movie) -> Movie | None:
+    """The current row for `m`, or None if it was removed or replaced since `m` was read.
+
+    Re-read right before every write or rqbit call: the movie may have been removed
+    (or removed and added again with a new torrent) while an rqbit call was in
+    flight, and a stale full-row upsert would resurrect it (R7).
+    """
+    current = store.get(m.tmdb_id)
+    if current is None or current.status != "downloading" or current.torrent_id != m.torrent_id:
+        return None
+    return current
+
+
+async def _fail(store: Store, rqbit: RqbitClient, current: Movie) -> None:
+    store.upsert(replace(current, status="failed", download_bps=0.0, eta_s=None))
+    # Best effort: a failed torrent must not keep downloading or filling the disk.
+    # The retry (R14) removes it for good.
+    try:
+        await rqbit.pause(current.torrent_id)
+    except RqbitError as e:
+        log.info("could not pause failed torrent %s: %s", current.torrent_id, e)
+
+
 async def _refresh_one(store: Store, rqbit: RqbitClient, m: Movie, now: float,
                        watch_started: float | None) -> None:
-    s = await rqbit.stats(m.torrent_id)
-    if s.finished:
-        # Only touch rqbit if the movie still exists (it may have been removed meanwhile).
-        current = store.get(m.tmdb_id)
-        if current is None or current.status != "downloading":
+    try:
+        s = await rqbit.stats(m.torrent_id)
+    except RqbitError as e:
+        if e.status != 404:
+            raise
+        # rqbit does not know this torrent (any more): it will never finish.
+        current = _still_downloading(store, m)
+        if current is not None:
+            log.warning("torrent %s of movie %s is unknown to rqbit", m.torrent_id, m.tmdb_id)
+            await _fail(store, rqbit, current)
+        return
+    if s.finished and s.state != "paused":
+        if _still_downloading(store, m) is None:
             return
         await rqbit.pause(m.torrent_id)
-    # Re-read right before writing: the movie may have been removed while the stats
-    # call was in flight, and a stale full-row upsert would resurrect it (R7).
-    current = store.get(m.tmdb_id)
-    if current is None or current.status != "downloading":
+    current = _still_downloading(store, m)
+    if current is None:
         return
     grew = s.progress_bytes > current.progress_bytes
     updated = replace(
@@ -68,10 +97,11 @@ async def _refresh_one(store: Store, rqbit: RqbitClient, m: Movie, now: float,
         eta_s=s.eta_s, last_progress_at=now if grew else current.last_progress_at,
     )
     if s.finished:
-        updated = replace(updated, status="done", download_bps=0.0, eta_s=None)
+        store.upsert(replace(updated, status="done", download_bps=0.0, eta_s=None))
     elif s.state == "live" and s.live_peers == 0 and _stalled(updated, now, watch_started):
-        updated = replace(updated, status="failed", download_bps=0.0, eta_s=None)
-    store.upsert(updated)
+        await _fail(store, rqbit, updated)
+    else:
+        store.upsert(updated)
 
 
 def _stalled(m: Movie, now: float, watch_started: float | None) -> bool:
@@ -115,19 +145,18 @@ async def remove_movie(store: Store, rqbit: RqbitClient, movies_dir: Path,
     except RqbitError as e:
         if e.status != 404:
             raise
+    # Exactly the output_folder start_download gave rqbit, whatever the torrent nests inside.
     root = Path(movies_dir).resolve()
-    parent = Path(m.file_path).parent.resolve()
-    if parent.is_relative_to(root) and parent != root:
-        # The library folder is the first path segment under movies_dir; a multi-file
-        # torrent may nest the video deeper (Title (Year)/Sub.Dir/movie.mkv).
-        folder = root / parent.relative_to(root).parts[0]
+    name = library_name(m.title, m.year)
+    folder = (root / name).resolve() if name else root
+    if folder != root and folder.is_relative_to(root):
         if folder.exists():
             try:
                 shutil.rmtree(folder)
             except OSError as e:
                 log.warning("could not remove %s: %s", folder, e)
     else:
-        log.warning("not removing %s: outside movies dir %s", parent, root)
+        log.warning("not removing %r: not a folder inside movies dir %s", name, root)
     store.delete(tmdb_id)
 
 
