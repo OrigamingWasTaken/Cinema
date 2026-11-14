@@ -65,10 +65,19 @@ class DirectorySetup:
             os.makedirs(os.path.join(self.config_path, svc), exist_ok=True)
 
 
+def prowlarr_running() -> bool:
+    """True when a container named exactly `prowlarr` is running (the v1 one uses that name)."""
+    result = subprocess.run(["sudo", docker_bin(), "ps", "-q", "-f", "name=^prowlarr$"],
+                            capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
 def migrate_prowlarr_config(v1_config_path: Optional[str], config_path: str) -> bool:
     """Copy the v1 Prowlarr folder into the v2 config unless it already has a config.xml.
 
     config.xml is copied last, so a present config.xml means the copy completed.
+    Refuses while a `prowlarr` container runs: v1 would keep writing its database
+    mid-copy, and v2 needs the same container name and port.
     """
     if not v1_config_path:
         return False
@@ -79,6 +88,12 @@ def migrate_prowlarr_config(v1_config_path: Optional[str], config_path: str) -> 
         return False
     if os.path.exists(os.path.join(target, "config.xml")):
         return False
+    if prowlarr_running():
+        print("A Prowlarr container is still running (the v1 stack). Stop v1 first;")
+        print("its configs stay in place as a backup:")
+        print("  cd <v1 dir> && sudo docker compose down")
+        print("Then run this again: sudo python3 setup.py")
+        sys.exit(1)
     try:
         shutil.copytree(source, target, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("config.xml"))
@@ -279,6 +294,24 @@ class ProwlarrConfigurator:
                 print(f"  WARNING: could not add indexer {name}: {e}")
 
 
+def dav_auth_warning(dav_user: Optional[str], dav_password: Optional[str]) -> Optional[str]:
+    """The cinema app turns WebDAV auth on only when BOTH DAV_USER and DAV_PASSWORD are set."""
+    if bool(dav_user) != bool(dav_password):
+        return ("WARNING: only one of DAV_USER / DAV_PASSWORD is set, so WebDAV has no "
+                "login. Set both to require one.")
+    return None
+
+
+def infuse_login_lines(dav_user: Optional[str], dav_password: Optional[str]) -> list:
+    if dav_user and dav_password:
+        return [f"       username {dav_user}, password = DAV_PASSWORD from .env"]
+    lines = ["       leave username and password empty"]
+    warning = dav_auth_warning(dav_user, dav_password)
+    if warning:
+        lines.append(f"       ({warning})")
+    return lines
+
+
 def detect_ip() -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -308,6 +341,11 @@ def main():
     print(f"  Data path: {config.data_path}")
     print(f"  Config path: {config.config_path}")
     print(f"  PUID:PGID = {config.puid}:{config.pgid}")
+    dav_user = config.all.get("DAV_USER")
+    dav_password = config.all.get("DAV_PASSWORD")
+    warning = dav_auth_warning(dav_user, dav_password)
+    if warning:
+        print(f"  {warning}")
 
     print("\n[Phase 2] Creating directories...")
     DirectorySetup(config.data_path, config.config_path).create()
@@ -331,7 +369,6 @@ def main():
     ProwlarrConfigurator(config.config_path).configure()
 
     ip = detect_ip()
-    dav_user = config.all.get("DAV_USER")
     print("\n" + "=" * 50)
     print("Setup complete!")
     print("=" * 50)
@@ -341,10 +378,8 @@ def main():
     print("  1. Buy Infuse Pro (Family Sharing covers the household).")
     print("  2. Add share -> WebDAV (not SMB):")
     print(f"       address {ip}, port 8888, path /dav, name \"Cinema\"")
-    if dav_user:
-        print(f"       username {dav_user}, password = DAV_PASSWORD from .env")
-    else:
-        print("       leave username and password empty")
+    for line in infuse_login_lines(dav_user, dav_password):
+        print(line)
     print("  3. Settings -> Subtitles: auto-download, English.")
 
 

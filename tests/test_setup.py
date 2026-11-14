@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -93,7 +94,17 @@ class TestDirectorySetup(unittest.TestCase):
             ds.create()
 
 
+def docker_ps(stdout=""):
+    return mock.patch("subprocess.run",
+                      return_value=subprocess.CompletedProcess([], 0, stdout=stdout, stderr=""))
+
+
 class TestMigrate(unittest.TestCase):
+    def setUp(self):
+        patcher = docker_ps()
+        self.run = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _v1(self, root):
         v1 = os.path.join(root, "v1")
         os.makedirs(os.path.join(v1, "prowlarr"))
@@ -155,6 +166,37 @@ class TestMigrate(unittest.TestCase):
                 migrate_prowlarr_config(v1, cfg)
             self.assertFalse(os.path.exists(os.path.join(cfg, "prowlarr", "config.xml")))
             self.assertIn("sudo python3 setup.py", out.getvalue())
+
+    def test_migrate_refuses_while_prowlarr_runs(self):
+        import setup
+        with tempfile.TemporaryDirectory() as root:
+            v1 = self._v1(root)
+            cfg = os.path.join(root, "config")
+            os.makedirs(os.path.join(cfg, "prowlarr"))
+            out = io.StringIO()
+            with docker_ps("3f2a9c\n") as run, mock.patch("setup.docker_bin",
+                                                       return_value="/bin/docker"), \
+                    contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                setup.migrate_prowlarr_config(v1, cfg)
+            run.assert_called_once()
+            self.assertEqual(run.call_args[0][0],
+                             ["sudo", "/bin/docker", "ps", "-q", "-f", "name=^prowlarr$"])
+            self.assertFalse(os.path.exists(os.path.join(cfg, "prowlarr", "config.xml")))
+            self.assertIn("sudo docker compose down", out.getvalue())
+            self.assertIn("sudo python3 setup.py", out.getvalue())
+
+    def test_migrate_checks_docker_only_when_copying(self):
+        from setup import migrate_prowlarr_config
+        with tempfile.TemporaryDirectory() as root:
+            v1 = self._v1(root)
+            cfg = os.path.join(root, "config")
+            os.makedirs(os.path.join(cfg, "prowlarr"))
+            self.assertFalse(migrate_prowlarr_config(None, cfg))
+            self.run.assert_not_called()
+            self.assertTrue(migrate_prowlarr_config(v1, cfg))  # nothing running: copies
+            self.assertEqual(self.run.call_count, 1)
+            self.assertFalse(migrate_prowlarr_config(v1, cfg))  # already migrated
+            self.assertEqual(self.run.call_count, 1)
 
     def test_migrate_false_when_source_has_no_config_xml(self):
         from setup import migrate_prowlarr_config
@@ -314,6 +356,21 @@ class TestHelpers(unittest.TestCase):
             self.assertEqual(setup.docker_bin(), "/usr/local/bin/docker")
         with mock.patch("shutil.which", return_value="/usr/bin/docker"):
             self.assertEqual(setup.docker_bin(), "/usr/bin/docker")
+
+
+class TestDavHint(unittest.TestCase):
+    def test_login_only_when_both_set(self):
+        from setup import dav_auth_warning, infuse_login_lines
+        self.assertIn("username u", infuse_login_lines("u", "p")[0])
+        self.assertIsNone(dav_auth_warning("u", "p"))
+        self.assertIsNone(dav_auth_warning("", None))
+        self.assertEqual(infuse_login_lines("", ""),
+                         ["       leave username and password empty"])
+        for user, password in (("u", ""), ("", "p")):
+            self.assertIn("only one of DAV_USER / DAV_PASSWORD", dav_auth_warning(user, password))
+            lines = infuse_login_lines(user, password)
+            self.assertIn("leave username and password empty", lines[0])
+            self.assertIn("WARNING", lines[1])
 
 
 class TestCompose(unittest.TestCase):

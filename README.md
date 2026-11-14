@@ -36,11 +36,28 @@ sudo python3 setup.py
   example `1024` and `100`).
 - `sudo` is required: docker needs it, and a v1 Prowlarr config is only
   readable by root.
-- `DAV_USER`/`DAV_PASSWORD` are optional. Leave them empty for no WebDAV login.
+- `DAV_USER`/`DAV_PASSWORD` are optional. The WebDAV login is only turned on
+  when both are set; leave both empty for no login. Setup warns if only one is
+  set.
 
 Setup creates the folders, starts the containers, migrates a v1 Prowlarr
 config if one exists, and adds indexers. At the end it prints the phone app URL
 (`http://192.168.x.x:8888`) and the Infuse settings.
+
+### Migrating from v1
+
+v1 and v2 both use containers named `prowlarr` and `flaresolverr` and port
+9696, so stop v1 before the first v2 setup. Its configs stay where they are, as
+a backup.
+
+```bash
+cd <v1 dir> && sudo docker compose down    # the folder with the v1 docker-compose.yml
+cd <v2 dir> && sudo python3 setup.py
+```
+
+Set `V1_CONFIG_PATH` in `.env` to the v1 config folder so setup copies the v1
+Prowlarr config. Setup stops with this same instruction if v1's Prowlarr is
+still running.
 
 ### Indexers
 
@@ -76,7 +93,8 @@ It needs:
 
 1. Add Files -> Add Share -> choose **WebDAV**, not SMB (an easy mistake).
 2. Address: the NAS IP. Port: `8888`. Path: `/dav`.
-3. Username and password: leave empty unless you set `DAV_USER`.
+3. Username and password: leave empty unless you set both `DAV_USER` and
+   `DAV_PASSWORD`.
 4. Optional: Settings -> Subtitles -> auto-download, English.
 
 ## Where things live
