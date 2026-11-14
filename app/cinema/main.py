@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -17,7 +18,9 @@ from cinema.store import Store
 from cinema.tmdb import TmdbClient
 from cinema.webdav import build_dav_router
 
+# The built phone app (npm run build in app/web, or the Docker web stage).
 STATIC_DIR = Path(__file__).parent / "static"
+log = logging.getLogger(__name__)
 
 
 class StaticApp(StaticFiles):
@@ -32,7 +35,8 @@ class StaticApp(StaticFiles):
 def create_app(settings: Settings, *, store: Store | None = None,
                rqbit: RqbitClient | None = None, tmdb: TmdbClient | None = None,
                prowlarr: ProwlarrClient | None = None, start_poller: bool = True,
-               clock: Callable[[], float] = time.monotonic) -> FastAPI:
+               clock: Callable[[], float] = time.monotonic,
+               static_dir: Path | None = None) -> FastAPI:
     owned_http: httpx.AsyncClient | None = None
     if rqbit is None or tmdb is None or prowlarr is None:
         owned_http = httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5))
@@ -76,7 +80,11 @@ def create_app(settings: Settings, *, store: Store | None = None,
             if settings.dav_user and settings.dav_password else None)
     app.include_router(build_dav_router(store, rqbit, rqbit.http, settings.legacy_dir, auth))
     # Last: the catch-all mount must not shadow /api, /dav or /healthz.
-    app.mount("/", StaticApp(directory=STATIC_DIR, html=True), name="static")
+    static_dir = STATIC_DIR if static_dir is None else static_dir
+    if not static_dir.is_dir():
+        # The API and WebDAV still work; only the phone app is missing until it is built.
+        log.warning("phone app not built: %s does not exist", static_dir)
+    app.mount("/", StaticApp(directory=static_dir, html=True, check_dir=False), name="static")
 
     return app
 
