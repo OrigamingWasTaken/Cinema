@@ -1,0 +1,108 @@
+// The JSON API in app/cinema/api.py.
+
+export type State = "preparing" | "ready" | "done" | "failed";
+
+export interface Card {
+  id: number;
+  title: string;
+  year: number | null;
+  poster_path: string | null;
+  backdrop_path: string | null;
+  in_library: boolean;
+}
+
+export interface LibraryItem {
+  tmdb_id: number;
+  title: string;
+  year: number | null;
+  poster_path: string | null;
+  state: State;
+  percent: number;
+  eta_s: number | null;
+  may_buffer: boolean;
+}
+
+export interface HomeData {
+  library: LibraryItem[];
+  trending: Card[];
+  popular: Card[];
+  disk: { free_bytes: number; total_bytes: number } | null;
+  catalog_error?: boolean;
+}
+
+export interface MovieInfo {
+  id: number;
+  title: string;
+  original_title: string;
+  year: number | null;
+  runtime: number | null;
+  overview: string;
+  poster_path: string | null;
+  backdrop_path: string | null;
+}
+
+export interface MovieData {
+  movie: MovieInfo;
+  library: LibraryItem | null;
+}
+
+export interface ReleaseView {
+  id: string;
+  resolution: number;
+  size_bytes: number;
+  source: "bluray" | "web" | "other";
+  sound: string;
+  lang: "original" | "multi" | "french_subs";
+  speed: "fast" | "ok" | "slow";
+}
+
+export interface ReleasesData {
+  recommended: ReleaseView | null;
+  groups: { resolution: number; standard: ReleaseView[]; atmos: ReleaseView[] }[];
+}
+
+export class ApiError extends Error {
+  constructor(public status: number, public code: string | null) {
+    super(code || `http ${status}`);
+  }
+}
+
+interface Options {
+  method?: string;
+  body?: unknown;
+  timeout?: number;
+  signal?: AbortSignal;
+}
+
+/** Fetch /api{path}. Network failures and timeouts throw ApiError with status 0. */
+export async function api<T>(path: string, { method = "GET", body, timeout = 20000, signal }: Options = {}): Promise<T> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), timeout);
+  const cancel = () => abort.abort();
+  signal?.addEventListener("abort", cancel);
+  try {
+    const resp = await fetch(`/api${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+      signal: abort.signal,
+    });
+    if (resp.status === 204) return null as T;
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) throw new ApiError(resp.status, data && data.error);
+    return data as T;
+  } catch (err) {
+    if (signal?.aborted) throw new ApiError(-1, "aborted");
+    throw err instanceof ApiError ? err : new ApiError(0, "network");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+
+export const isActive = (item: LibraryItem | null | undefined): boolean =>
+  !!item && (item.state === "preparing" || item.state === "ready");
+
+const IMAGE = "https://image.tmdb.org/t/p/";
+export const posterUrl = (path: string) => `${IMAGE}w342${path}`;
+export const backdropUrl = (path: string, size: "w780" | "w1280" = "w1280") => `${IMAGE}${size}${path}`;

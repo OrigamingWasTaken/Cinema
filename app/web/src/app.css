@@ -1,0 +1,123 @@
+/* Cinema: the family's phone remote for the home projector.
+   A dimmed auditorium (plum-black, like a curtain) lit by one warm tungsten accent,
+   kept for the things that start a film. Posters do the talking. */
+
+:root {
+  --curtain: #15111b;     /* page */
+  --velvet: #201a28;      /* raised surfaces */
+  --aisle: #2b2335;       /* pressed, inputs */
+  --line: rgb(255 255 255 / 0.08);
+  --screen: #f4eee6;      /* text, warm like a lit screen */
+  --usher: #a99fb4;       /* secondary text */
+  --tungsten: #f3c26b;    /* the one accent */
+  --tungsten-ink: #2b1c06;
+  --ready: #9fd8b0;
+  --failed: #f29a88;
+  --skeleton: #231c2b;
+
+  --serif: ui-serif, "New York", "Iowan Old Style", "Noto Serif", Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+  --gutter: 16px;
+  --r-poster: 8px;
+  --r-card: 14px;
+  --r-button: 14px;
+  --tabbar-space: calc(env(safe-area-inset-bottom) + 92px);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  background: var(--curtain);
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--curtain);
+  color: var(--screen);
+  font: 400 16px/1.45 var(--sans);
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: none;
+}
+
+body.locked { overflow: hidden; }
+
+a { color: inherit; text-decoration: none; }
+button, input { font: inherit; color: inherit; }
+button { -webkit-user-select: none; user-select: none; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--tungsten); outline-offset: 2px; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- buttons shared by the hero, the film page and the sheet */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: var(--r-button);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0.005em;
+  cursor: pointer;
+  transition: transform 0.15s ease, background-color 0.2s ease, opacity 0.2s ease;
+}
+.btn:active:not(:disabled) { transform: scale(0.98); }
+.btn:disabled { cursor: default; }
+.btn--block { width: 100%; }
+.btn--primary {
+  background: var(--tungsten);
+  color: var(--tungsten-ink);
+  box-shadow: 0 8px 28px rgb(243 194 107 / 0.22);
+}
+.btn--primary:disabled { opacity: 0.75; box-shadow: none; }
+.btn--secondary {
+  background: rgb(255 255 255 / 0.1);
+  color: var(--screen);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+.btn--secondary:disabled { opacity: 0.45; }
+.btn--quiet {
+  background: transparent;
+  color: var(--usher);
+  min-height: 44px;
+  font-size: 15px;
+  font-weight: 550;
+}
+.btn--danger { background: rgb(242 154 136 / 0.16); color: var(--failed); }
+
+/* ---- large tab titles, like a native app */
+
+.screen-title {
+  margin: 0;
+  padding: calc(env(safe-area-inset-top) + 18px) var(--gutter) 14px;
+  font: 650 32px/1.1 var(--serif);
+  letter-spacing: -0.005em;
+}
+
+.section-title {
+  margin: 0 var(--gutter) 12px;
+  font: 600 20px/1.2 var(--serif);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition: none; }
+}
