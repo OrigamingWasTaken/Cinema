@@ -21,6 +21,7 @@ class MovieCard:
     title: str
     year: int | None
     poster_path: str | None
+    backdrop_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ def _year(release_date) -> int | None:
 
 def _card(item: dict) -> MovieCard:
     return MovieCard(item["id"], item["title"], _year(item.get("release_date")),
-                     item.get("poster_path"))
+                     item.get("poster_path"), item.get("backdrop_path"))
 
 
 class TmdbClient:

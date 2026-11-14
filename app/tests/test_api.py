@@ -18,7 +18,7 @@ MOVIE = {
     "backdrop_path": "/b.jpg",
 }
 CARD = {"id": 693134, "title": "Dune: Part Two", "release_date": "2024-02-27",
-        "poster_path": "/p.jpg"}
+        "poster_path": "/p.jpg", "backdrop_path": "/b.jpg"}
 OTHER = {"id": 5, "title": "Other", "release_date": "", "poster_path": None}
 FILES = [(["Dune", "Dune.mkv"], 1000)]
 
@@ -98,8 +98,10 @@ async def test_home_shape(settings, tmp_path):
     assert [m["tmdb_id"] for m in body["library"]] == [693134, 1]
     assert {"tmdb_id", "title", "year", "poster_path", "state", "percent"} <= set(body["library"][0])
     assert body["trending"][0] == {"id": 693134, "title": "Dune: Part Two", "year": 2024,
-                                   "poster_path": "/p.jpg", "in_library": True}
+                                   "poster_path": "/p.jpg", "backdrop_path": "/b.jpg",
+                                   "in_library": True}
     assert body["popular"][1]["in_library"] is False and body["popular"][1]["year"] is None
+    assert body["popular"][1]["backdrop_path"] is None
     assert set(body["disk"]) == {"free_bytes", "total_bytes"} and body["disk"]["total_bytes"] > 0
     assert "catalog_error" not in body
 

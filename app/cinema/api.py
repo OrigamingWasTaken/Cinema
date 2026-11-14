@@ -80,7 +80,7 @@ def release_id(release: Release) -> str:
 
 def _card(c: MovieCard, store: Store) -> dict:
     return {"id": c.id, "title": c.title, "year": c.year, "poster_path": c.poster_path,
-            "in_library": store.get(c.id) is not None}
+            "backdrop_path": c.backdrop_path, "in_library": store.get(c.id) is not None}
 
 
 def _library_item(m: Movie) -> dict:

@@ -53,13 +53,14 @@ async def test_search_passes_query_and_language():
         seen.append(request)
         return httpx.Response(200, json={"results": [
             {"id": 1, "title": "Dune", "release_date": "2021-09-15", "poster_path": None},
-            {"id": 2, "title": "Odd", "release_date": "", "poster_path": "/o.jpg"}]})
+            {"id": 2, "title": "Odd", "release_date": "", "poster_path": "/o.jpg",
+             "backdrop_path": "/ob.jpg"}]})
 
     cards = await make(handler).search("dune")
     q = seen[0].url.params
     assert seen[0].url.path == "/3/search/movie"
     assert q["query"] == "dune" and q["language"] == "fr-FR" and q["include_adult"] == "false"
-    assert cards == [MovieCard(1, "Dune", 2021, None), MovieCard(2, "Odd", None, "/o.jpg")]
+    assert cards == [MovieCard(1, "Dune", 2021, None), MovieCard(2, "Odd", None, "/o.jpg", "/ob.jpg")]
 
 
 @pytest.mark.anyio
