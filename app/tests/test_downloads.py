@@ -92,6 +92,30 @@ async def test_refresh_marks_stalled_failed(store):
 
 
 @pytest.mark.anyio
+async def test_refresh_after_reboot_does_not_fail_old_download(store):
+    now = 50_000.0
+    store.upsert(movie(last_progress_at=now - 3600))
+    # rqbit just restarted: hash check in progress, no live stats
+    rq = StubRqbit({1: stats(state="initializing", live_peers=0)})
+    await refresh(store, rq, now=now, watch_started=now)
+    assert store.get(1).status == "downloading"
+    # still checking long after: only a live torrent can stall
+    await refresh(store, rq, now=now + STALL_SECONDS + 1, watch_started=now)
+    assert store.get(1).status == "downloading"
+
+
+@pytest.mark.anyio
+async def test_refresh_stall_clock_starts_at_watch_start(store):
+    started = 50_000.0
+    store.upsert(movie(last_progress_at=started - 3600))
+    rq = StubRqbit({1: stats(state="live", live_peers=0)})
+    await refresh(store, rq, now=started + STALL_SECONDS, watch_started=started)
+    assert store.get(1).status == "downloading"
+    await refresh(store, rq, now=started + STALL_SECONDS + 1, watch_started=started)
+    assert store.get(1).status == "failed"
+
+
+@pytest.mark.anyio
 async def test_refresh_not_failed_if_peers_present(store):
     store.upsert(movie())
     rq = StubRqbit({1: stats(live_peers=3)})
@@ -158,6 +182,25 @@ async def test_run_poller_survives_unexpected_exception(store):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert store.get(1).progress_bytes == 5
+
+
+@pytest.mark.anyio
+async def test_run_poller_does_not_fail_download_idle_before_it_started(store):
+    store.upsert(movie(last_progress_at=time.time() - 3600))
+    polled = asyncio.Event()
+
+    class NoPeers(StubRqbit):
+        async def stats(self, tid):
+            polled.set()
+            return stats(state="live", live_peers=0)
+
+    task = asyncio.create_task(run_poller(store, NoPeers(), interval=0.01))
+    await asyncio.wait_for(polled.wait(), 5)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert store.get(1).status == "downloading"
 
 
 def _library(tmp_path, tmdb_id=1):

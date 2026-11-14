@@ -48,7 +48,8 @@ async def start_download(store: Store, rqbit: RqbitClient, movies_dir: Path, *,
     return movie
 
 
-async def _refresh_one(store: Store, rqbit: RqbitClient, m: Movie, now: float) -> None:
+async def _refresh_one(store: Store, rqbit: RqbitClient, m: Movie, now: float,
+                       watch_started: float | None) -> None:
     s = await rqbit.stats(m.torrent_id)
     if s.finished:
         # Only touch rqbit if the movie still exists (it may have been removed meanwhile).
@@ -68,25 +69,35 @@ async def _refresh_one(store: Store, rqbit: RqbitClient, m: Movie, now: float) -
     )
     if s.finished:
         updated = replace(updated, status="done", download_bps=0.0, eta_s=None)
-    elif now - updated.last_progress_at > STALL_SECONDS and s.live_peers == 0:
+    elif s.state == "live" and s.live_peers == 0 and _stalled(updated, now, watch_started):
         updated = replace(updated, status="failed", download_bps=0.0, eta_s=None)
     store.upsert(updated)
 
 
-async def refresh(store: Store, rqbit: RqbitClient, now: float) -> None:
+def _stalled(m: Movie, now: float, watch_started: float | None) -> bool:
+    # The stall clock never starts before this poller began watching: a NAS reboot or
+    # app downtime is not time without peers.
+    since = m.last_progress_at if watch_started is None else max(m.last_progress_at,
+                                                                  watch_started)
+    return now - since > STALL_SECONDS
+
+
+async def refresh(store: Store, rqbit: RqbitClient, now: float,
+                  watch_started: float | None = None) -> None:
     for m in store.all():
         if m.status != "downloading":
             continue
         try:
-            await _refresh_one(store, rqbit, m, now)
+            await _refresh_one(store, rqbit, m, now, watch_started)
         except RqbitError as e:
             log.warning("rqbit error refreshing movie %s: %s", m.tmdb_id, e)
 
 
 async def run_poller(store: Store, rqbit: RqbitClient, interval: float = 3.0) -> None:
+    started = time.time()
     while True:
         try:
-            await refresh(store, rqbit, time.time())
+            await refresh(store, rqbit, time.time(), watch_started=started)
         except asyncio.CancelledError:
             raise
         except Exception:
