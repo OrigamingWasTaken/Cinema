@@ -6,6 +6,7 @@ services:
       - TZ=${TZ}
       - TMDB_TOKEN=${TMDB_TOKEN}
       - TMDB_LANGUAGE=${TMDB_LANGUAGE}
+      - PROWLARR_API_KEY=${PROWLARR_API_KEY:-}
       - DAV_USER=${DAV_USER}
       - DAV_PASSWORD=${DAV_PASSWORD}
     volumes:

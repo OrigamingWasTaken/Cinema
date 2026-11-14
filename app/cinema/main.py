@@ -41,7 +41,8 @@ def create_app(settings: Settings, *, store: Store | None = None,
     if tmdb is None:
         tmdb = TmdbClient(settings.tmdb_token, settings.tmdb_language, owned_http)
     if prowlarr is None:
-        prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key, owned_http)
+        prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key, owned_http,
+                                  config_xml=settings.prowlarr_config_xml)
     if store is None:
         store = Store(settings.db_path)
 
@@ -61,6 +62,7 @@ def create_app(settings: Settings, *, store: Store | None = None,
     app.state.settings = settings
     app.state.store = store
     app.state.rqbit = rqbit
+    app.state.prowlarr = prowlarr
 
     @app.get("/healthz")
     def healthz():

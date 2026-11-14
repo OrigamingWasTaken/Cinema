@@ -316,5 +316,12 @@ class TestHelpers(unittest.TestCase):
             self.assertEqual(setup.docker_bin(), "/usr/bin/docker")
 
 
+class TestCompose(unittest.TestCase):
+    def test_cinema_gets_optional_prowlarr_api_key(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")
+        with open(path) as f:
+            self.assertIn("- PROWLARR_API_KEY=${PROWLARR_API_KEY:-}", f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

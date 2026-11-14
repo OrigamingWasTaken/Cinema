@@ -1,4 +1,6 @@
 import asyncio
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
@@ -22,6 +24,15 @@ class ProwlarrError(Exception):
     pass
 
 
+def api_key_from_config_xml(path: Path | str) -> str:
+    """Prowlarr's ApiKey from its config.xml, or "" while the file is missing or incomplete."""
+    try:
+        key = ET.parse(path).getroot().findtext("ApiKey")
+    except (OSError, ET.ParseError):
+        return ""
+    return (key or "").strip()
+
+
 def _release(item: dict) -> Release:
     return Release(
         guid=item["guid"],
@@ -41,21 +52,28 @@ def _built_magnet(r: Release) -> str:
 
 
 class ProwlarrClient:
-    def __init__(self, base_url: str, api_key: str, http: httpx.AsyncClient):
+    def __init__(self, base_url: str, api_key: str, http: httpx.AsyncClient,
+                 config_xml: Path | None = None):
         self._base = base_url.rstrip("/")
         self._key = api_key
         self._http = http
+        self._config_xml = config_xml
 
-    def _require_key(self) -> None:
+    def _api_key(self) -> str:
+        # On a fresh install cinema starts before Prowlarr writes config.xml, so keep
+        # looking for the key until it shows up.
+        if not self._key and self._config_xml is not None:
+            self._key = api_key_from_config_xml(self._config_xml)
         if not self._key:
             raise ProwlarrError("prowlarr api key is not configured")
+        return self._key
 
-    async def _search_one(self, query: str) -> list[dict]:
+    async def _search_one(self, query: str, key: str) -> list[dict]:
         try:
             resp = await self._http.get(
                 f"{self._base}/api/v1/search",
                 params={"query": query, "type": "movie", "categories": 2000, "limit": 100},
-                headers={"X-Api-Key": self._key},
+                headers={"X-Api-Key": key},
                 timeout=SEARCH_TIMEOUT,
             )
         except httpx.HTTPError as e:
@@ -71,11 +89,20 @@ class ProwlarrClient:
         return data
 
     async def search(self, queries: list[str]) -> list[Release]:
-        self._require_key()
-        results = await asyncio.gather(*(self._search_one(q) for q in queries))
+        key = self._api_key()
+        results = await asyncio.gather(*(self._search_one(q, key) for q in queries),
+                                       return_exceptions=True)
+        failures = [r for r in results if isinstance(r, BaseException)]
+        for failure in failures:
+            if not isinstance(failure, ProwlarrError):
+                raise failure
+        if failures and len(failures) == len(results):
+            raise failures[0]
         seen: set[str] = set()
         out: list[Release] = []
         for items in results:
+            if isinstance(items, BaseException):
+                continue
             for item in items:
                 if item.get("protocol") != "torrent":
                     continue
@@ -111,7 +138,7 @@ class ProwlarrClient:
         raise ProwlarrError("prowlarr download failed: too many redirects")
 
     async def resolve(self, r: Release) -> TorrentSource:
-        self._require_key()
+        self._api_key()
         if r.magnet and r.magnet.startswith("magnet:"):
             return r.magnet
         url = r.download_url or (r.magnet if r.magnet and r.magnet.startswith("http") else None)

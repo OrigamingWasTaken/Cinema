@@ -173,3 +173,38 @@ async def test_resolve_garbage_without_info_hash_raises():
     assert "secret" not in str(e.value)
     with pytest.raises(ProwlarrError):
         await make(handler).resolve(release())
+
+
+@pytest.mark.anyio
+async def test_key_read_from_config_xml_once_it_exists(tmp_path):
+    xml = tmp_path / "config.xml"
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("x-api-key"))
+        return httpx.Response(200, json=[item("a")])
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ProwlarrClient(BASE, "", http, config_xml=xml)
+    with pytest.raises(ProwlarrError):
+        await client.search(["x"])
+    xml.write_text("<Config><ApiKey>late</ApiKey></Config>")
+    assert [r.guid for r in await client.search(["x"])] == ["a"]
+    assert seen == ["late"]
+
+
+@pytest.mark.anyio
+async def test_search_returns_results_when_only_some_queries_fail():
+    def handler(request):
+        if request.url.params["query"] == "bad":
+            return httpx.Response(500)
+        return httpx.Response(200, json=[item("ok")])
+
+    out = await make(handler).search(["bad", "good"])
+    assert [r.guid for r in out] == ["ok"]
+
+    def all_bad(request):
+        return httpx.Response(500)
+
+    with pytest.raises(ProwlarrError):
+        await make(all_bad).search(["a", "b"])
