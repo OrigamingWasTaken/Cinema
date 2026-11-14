@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import replace
 from email.utils import formatdate
@@ -285,6 +286,36 @@ async def test_proxy_closes_upstream_on_disconnect(env):
     assert sum(len(m["body"]) for m in bodies) < SIZE
 
 
+@pytest.mark.anyio
+async def test_proxy_cancels_upstream_open_when_client_leaves(env):
+    env.add_downloading()
+    env.fake.stream_gate = asyncio.Event()  # rqbit is still waiting for the pieces
+    path = "/dav/Movies/Sintel (2010)/Sintel (2010).mkv"
+    sent: list[dict] = []
+    calls = 0
+
+    async def receive():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        while not any("stream" in r["path"] for r in env.fake.requests):
+            await asyncio.sleep(0.001)
+        return {"type": "http.disconnect"}  # the user seeks again, Infuse drops this one
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+             "http_version": "1.1", "method": "GET", "scheme": "http", "path": path,
+             "raw_path": quote(path).encode(), "root_path": "", "query_string": b"",
+             "headers": [(b"range", b"bytes=2000000-")], "client": ("test", 1),
+             "server": ("test", 80)}
+    await asyncio.wait_for(env.app(scope, receive, send), 5)
+    assert env.fake.cancelled_opens == [STREAM_KEY]
+    assert not [m for m in sent if m["type"] == "http.response.body" and m.get("body")]
+
+
 def test_dav_unicode_href_roundtrip(env):
     env.add_done(title="Amélie", year=2001)
     # the helper writes to a fixed folder; the name comes from the DB
@@ -298,6 +329,29 @@ def test_dav_unicode_href_roundtrip(env):
     r = c.get("/dav/Movies/Amélie (2001)/Amélie (2001).mkv")
     assert r.status_code == 200 and r.content == CONTENT
     assert c.get(file_href).content == CONTENT
+
+
+def test_dav_decomposed_unicode_request_finds_movie(env):
+    env.add_done(title="Amélie", year=2001)
+    decomposed = unicodedata.normalize("NFD", "Amélie (2001)")
+    assert decomposed != "Amélie (2001)"
+    c = env.client()
+    r = c.get(f"/dav/Movies/{quote(decomposed)}/{quote(decomposed)}.mkv")
+    assert r.status_code == 200 and r.content == CONTENT
+    _, resp = propfind(c, f"/dav/Movies/{quote(decomposed)}/")
+    assert "/dav/Movies/Am%C3%A9lie%20%282001%29/" in resp
+
+
+def test_dav_decomposed_legacy_folder_is_listed_composed(env):
+    name = unicodedata.normalize("NFD", "Léon (1994)")
+    legacy = env.settings.legacy_dir / name
+    legacy.mkdir(parents=True)
+    (legacy / f"{name}.mkv").write_bytes(b"leon")
+    c = env.client()
+    _, resp = propfind(c, "/dav/Movies/")
+    assert "/dav/Movies/" + quote("Léon (1994)") + "/" in resp
+    r = c.get("/dav/Movies/Léon (1994)/Léon (1994).mkv")
+    assert r.status_code == 200 and r.content == b"leon"
 
 
 def test_legacy_dir_listed(env):
@@ -353,6 +407,15 @@ def test_basic_auth_required_when_configured(tmp_path, settings):
     good = base64.b64encode(b"u:p").decode()
     r = c.request("PROPFIND", "/dav/", headers={"Authorization": f"Basic {good}"})
     assert r.status_code == 207
+
+
+def test_basic_auth_garbage_header_is_401(tmp_path, settings):
+    env = Env(tmp_path, settings, dav_user="u", dav_password="p")
+    c = env.client()
+    for header in (b"Basic \xc3\xa9\xff", b"Basic " + base64.b64encode(b"\xff:\xfe"),
+                   b"Basic !!!", b"Basic"):
+        r = c.request("PROPFIND", "/dav/", headers={"Authorization": header})
+        assert r.status_code == 401, header
 
 
 def test_unsupported_method_405(env):

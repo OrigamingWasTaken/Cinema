@@ -47,6 +47,10 @@ class FakeRqbit:
         self.requests: list[dict] = []
         self.closed_streams: list[tuple[int, int]] = []
         self.chunk_size = CHUNK
+        # When set, stream requests wait for it before answering (rqbit waiting for
+        # pieces); requests cancelled while waiting are recorded in cancelled_opens.
+        self.stream_gate: asyncio.Event | None = None
+        self.cancelled_opens: list[tuple[int, int]] = []
         self._next_id = 0
         self.transport = httpx.MockTransport(self._handle)
 
@@ -104,7 +108,14 @@ class FakeRqbit:
         if action == "delete":
             self.torrents[tid]["deleted"] = True
             return self._json(200, {})
-        return self._stream(tid, int(m.group(3)), request)
+        idx = int(m.group(3))
+        if self.stream_gate is not None:
+            try:
+                await self.stream_gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled_opens.append((tid, idx))
+                raise
+        return self._stream(tid, idx, request)
 
     def _stats(self, tid: int) -> dict:
         t = self.torrents[tid]

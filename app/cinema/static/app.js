@@ -142,6 +142,7 @@ function poller(tick) {
   let timer = null;
   let stopped = false;
   const schedule = () => {
+    clearTimeout(timer); // never two pending ticks
     if (!stopped) timer = setTimeout(run, POLL_MS);
   };
   async function run() {
@@ -200,6 +201,7 @@ function render() {
     page.syncSheet();
     return;
   }
+  clearTimeout(searchTimer); // a search typed before navigating away must not pull us back
   if (page) {
     scrollMemory.set(page.key, window.scrollY);
     page.dispose();
@@ -473,15 +475,20 @@ function moviePage(route, restoreScroll) {
   /** POST a release. Returns "ok", "expired" (release list must be refetched) or throws. */
   async function startDownload(releaseId) {
     try {
+      // The server may take resolve (30 s) + torrent metadata (120 s) + add (120 s).
       state.library = await api(`/movies/${id}/download`, {
-        method: "POST", body: { release_id: releaseId }, timeout: 60000 });
+        method: "POST", body: { release_id: releaseId }, timeout: 300000 });
     } catch (err) {
       if (err.status === 410) {
         state.releases = null;
         return "expired";
       }
-      if (err.status !== 409) throw err;
-      state.library = (await api(`/movies/${id}`)).library; // someone else got it first
+      if (err.status !== 409 && err.status !== 0) throw err;
+      // 409: someone else got it first. 0 (timeout, network): the add may still have
+      // gone through, so show the library status if the movie is there now.
+      const library = (await api(`/movies/${id}`)).library;
+      if (err.status === 0 && !library) throw err;
+      state.library = library;
     }
     if (isActive(state.library)) poll.start();
     return "ok";

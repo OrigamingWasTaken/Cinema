@@ -4,10 +4,11 @@ Finished files (and legacy files) are served from disk. Files that are still
 downloading are proxied to rqbit's stream endpoint, which blocks until the
 requested pieces have arrived.
 """
+import asyncio
 import base64
-import binascii
 import re
 import secrets
+import unicodedata
 import xml.etree.ElementTree as ET
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ METHODS = ["GET", "HEAD", "OPTIONS", "PROPFIND", "PUT", "POST", "DELETE", "PATCH
            "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"]
 SUFFIX_RANGE = re.compile(r"bytes=-(\d+)")
 PROXY_TIMEOUT = httpx.Timeout(10, read=None)
+CLIENT_GONE = 499  # never seen by anyone: the client disconnected before rqbit answered
 
 ET.register_namespace("D", DAV_NS)
 
@@ -54,6 +56,11 @@ class _File:
     @property
     def content_type(self) -> str:
         return CONTENT_TYPES.get(Path(self.filename).suffix.lower(), "application/octet-stream")
+
+
+def _nfc(name: str) -> str:
+    # macOS/tvOS clients and copied legacy folders may send or hold decomposed accents.
+    return unicodedata.normalize("NFC", name)
 
 
 def _href(*segments: str, collection: bool) -> str:
@@ -110,7 +117,7 @@ def _scan_library(store: Store, legacy_dir: Path) -> dict[str, _File]:
             continue
         if m.status == "downloading" and m.progress_bytes < READY_BYTES:
             continue
-        dirname = library_name(m.title, m.year)
+        dirname = _nfc(library_name(m.title, m.year))
         if dirname in library:
             continue
         path = Path(m.file_path)
@@ -121,7 +128,8 @@ def _scan_library(store: Store, legacy_dir: Path) -> dict[str, _File]:
     except OSError:
         legacy_dirs = []
     for d in legacy_dirs:
-        if d.name in library:
+        dirname = _nfc(d.name)
+        if dirname in library:
             continue
         try:
             videos = [(p, p.stat()) for p in d.iterdir()
@@ -130,7 +138,7 @@ def _scan_library(store: Store, legacy_dir: Path) -> dict[str, _File]:
             continue
         if videos:
             p, st = max(videos, key=lambda v: v[1].st_size)
-            library[d.name] = _File(d.name, p.name, st.st_size, st.st_mtime, p, None)
+            library[dirname] = _File(dirname, _nfc(p.name), st.st_size, st.st_mtime, p, None)
     return library
 
 
@@ -157,6 +165,40 @@ class _ProxyResponse(StreamingResponse):
             await self._stack.aclose()
 
 
+async def _until_disconnect(receive) -> None:
+    while (await receive())["type"] != "http.disconnect":
+        pass
+
+
+async def _open_upstream(request: Request, http: httpx.AsyncClient, url: str,
+                         headers: dict[str, str]) -> httpx.Response | None:
+    """Send the rqbit GET, or give up (None) if the client disconnects first.
+
+    rqbit holds back its response headers until the requested pieces have arrived,
+    which for a far seek takes a while; Infuse drops that request when the user
+    seeks again, and the abandoned one must not keep pulling pieces.
+    """
+    sending = asyncio.ensure_future(http.send(
+        http.build_request("GET", url, headers=headers, timeout=PROXY_TIMEOUT), stream=True))
+    gone = asyncio.ensure_future(_until_disconnect(request.receive))
+    client_gone = True  # also when this handler itself is cancelled mid-wait
+    try:
+        await asyncio.wait({sending, gone}, return_when=asyncio.FIRST_COMPLETED)
+        client_gone = gone.done()
+    finally:
+        gone.cancel()
+        sending.cancel()  # no-op once the response headers are in
+        (result,) = await asyncio.gather(sending, return_exceptions=True)
+        await asyncio.gather(gone, return_exceptions=True)
+        if client_gone and isinstance(result, httpx.Response):
+            await result.aclose()
+    if client_gone or isinstance(result, asyncio.CancelledError):
+        return None
+    if isinstance(result, httpx.Response):
+        return result
+    raise result
+
+
 def _authorized(request: Request, auth: tuple[str, str]) -> bool:
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
@@ -164,7 +206,7 @@ def _authorized(request: Request, auth: tuple[str, str]) -> bool:
         return False
     try:
         user, _, password = base64.b64decode(token).decode().partition(":")
-    except (binascii.Error, UnicodeDecodeError):
+    except ValueError:  # bad base64, non-ASCII header, undecodable bytes
         return False
     return (secrets.compare_digest(user.encode(), auth[0].encode())
             & secrets.compare_digest(password.encode(), auth[1].encode()))
@@ -224,13 +266,14 @@ def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
                 rng = f"bytes={max(0, f.size - n)}-{f.size - 1}"
             upstream_headers["Range"] = rng
         url = rqbit.stream_url(f.movie.torrent_id, f.movie.file_index)
-        stack = AsyncExitStack()
         try:
-            upstream = await stack.enter_async_context(
-                http.stream("GET", url, headers=upstream_headers, timeout=PROXY_TIMEOUT))
+            upstream = await _open_upstream(request, http, url, upstream_headers)
         except httpx.HTTPError:
-            await stack.aclose()
             return Response(status_code=502)
+        if upstream is None:
+            return Response(status_code=CLIENT_GONE)  # nobody is listening any more
+        stack = AsyncExitStack()
+        stack.push_async_callback(upstream.aclose)
         headers = dict(base)
         for name in ("Content-Range", "Content-Length", "Accept-Ranges"):
             if name in upstream.headers:
@@ -251,7 +294,7 @@ def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
             return Response(status_code=200, headers={"DAV": "1", "Allow": ALLOW})
         if method not in ("PROPFIND", "GET", "HEAD"):
             return Response(status_code=405, headers={"Allow": ALLOW})
-        segments = [s for s in request.path_params.get("path", "").split("/") if s]
+        segments = [_nfc(s) for s in request.path_params.get("path", "").split("/") if s]
         if method == "PROPFIND":
             return await propfind(request, segments)
         if len(segments) == 3 and segments[0] == "Movies":
