@@ -1,9 +1,11 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
 
 from cinema.config import Settings, load_settings
+from cinema.downloads import run_poller
 from cinema.rqbit import RqbitClient
 from cinema.store import Store
 from cinema.webdav import build_dav_router
@@ -20,9 +22,15 @@ def create_app(settings: Settings, *, store: Store | None = None,
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        yield
-        if owned_http is not None:
-            await owned_http.aclose()
+        poller = asyncio.create_task(run_poller(store, rqbit)) if start_poller else None
+        try:
+            yield
+        finally:
+            if poller is not None:
+                poller.cancel()
+                await asyncio.gather(poller, return_exceptions=True)
+            if owned_http is not None:
+                await owned_http.aclose()
 
     app = FastAPI(title="Cinema", lifespan=lifespan)
     app.state.settings = settings

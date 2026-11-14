@@ -8,6 +8,11 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi"}
 MIB = 1048576
 
 
+def _eta_secs(remaining) -> int | None:
+    secs = ((remaining or {}).get("duration") or {}).get("secs")
+    return int(secs) if secs is not None else None
+
+
 class RqbitError(Exception):
     def __init__(self, status: int, text: str):
         super().__init__(f"rqbit error {status}: {text}")
@@ -118,7 +123,7 @@ class RqbitClient:
             error=data.get("error"),
             download_bps=mbps * MIB,
             live_peers=((live.get("snapshot") or {}).get("peer_stats") or {}).get("live", 0),
-            eta_s=int(remaining["duration"]["secs"]) if remaining else None,
+            eta_s=_eta_secs(remaining),
         )
 
     async def pause(self, torrent_id: int) -> None:
