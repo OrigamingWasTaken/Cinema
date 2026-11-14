@@ -99,18 +99,24 @@ async def remove_movie(store: Store, rqbit: RqbitClient, movies_dir: Path,
     m = store.get(tmdb_id)
     if m is None:
         return
-    if m.torrent_id >= 0:  # negative id = no torrent (e.g. legacy library entry)
-        try:
-            await rqbit.delete(m.torrent_id)
-        except RqbitError as e:
-            if e.status != 404:
-                raise
+    try:
+        await rqbit.delete(m.torrent_id)
+    except RqbitError as e:
+        if e.status != 404:
+            raise
     root = Path(movies_dir).resolve()
-    folder = Path(m.file_path).resolve().parent
-    if folder != root and folder.is_relative_to(root):
-        shutil.rmtree(folder, ignore_errors=True)
+    parent = Path(m.file_path).parent.resolve()
+    if parent.is_relative_to(root) and parent != root:
+        # The library folder is the first path segment under movies_dir; a multi-file
+        # torrent may nest the video deeper (Title (Year)/Sub.Dir/movie.mkv).
+        folder = root / parent.relative_to(root).parts[0]
+        if folder.exists():
+            try:
+                shutil.rmtree(folder)
+            except OSError as e:
+                log.warning("could not remove %s: %s", folder, e)
     else:
-        log.warning("not removing %s: outside movies dir %s", folder, root)
+        log.warning("not removing %s: outside movies dir %s", parent, root)
     store.delete(tmdb_id)
 
 

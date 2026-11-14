@@ -1,3 +1,8 @@
+import asyncio
+import logging
+import shutil
+import time
+
 import httpx
 import pytest
 
@@ -144,7 +149,6 @@ async def test_run_poller_survives_unexpected_exception(store):
                 raise ValueError("bad payload")
             return stats(progress_bytes=5)
 
-    import asyncio
     task = asyncio.create_task(run_poller(store, Flaky(), interval=0.01))
     for _ in range(200):
         if store.get(1).progress_bytes == 5:
@@ -176,17 +180,11 @@ async def test_remove_deletes_torrent_folder_and_row(store, tmp_path):
 
 
 @pytest.mark.anyio
-async def test_remove_ignores_404_and_skips_missing_torrent(store, tmp_path):
+async def test_remove_ignores_404(store, tmp_path):
     movies, folder, f = _library(tmp_path)
     store.upsert(movie(file_path=str(f)))
     await remove_movie(store, StubRqbit(delete_error=RqbitError(404, "gone")), movies, 1)
     assert not folder.exists() and store.get(1) is None
-    # legacy entry: negative torrent id -> no rqbit call
-    movies, folder, f = _library(tmp_path)
-    store.upsert(movie(2, torrent_id=-1, file_path=str(f)))
-    rq = StubRqbit()
-    await remove_movie(store, rq, movies, 2)
-    assert rq.deleted == [] and not folder.exists() and store.get(2) is None
 
 
 @pytest.mark.anyio
@@ -238,5 +236,71 @@ async def test_stats_eta_tolerates_missing_duration(remaining):
     body = {"state": "live", "progress_bytes": 1, "total_bytes": 2, "finished": False,
             "live": {"time_remaining": remaining, "snapshot": {"peer_stats": {"live": 1}}}}
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json=body))
-    client = RqbitClient("http://rqbit:3030", httpx.AsyncClient(transport=transport))
-    assert (await client.stats(0)).eta_s is None
+    async with httpx.AsyncClient(transport=transport) as http:
+        assert (await RqbitClient("http://rqbit:3030", http).stats(0)).eta_s is None
+
+
+@pytest.mark.anyio
+async def test_transport_error_becomes_rqbit_error_and_refresh_skips_it(store):
+    def boom(request):
+        raise httpx.ConnectError("down")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as http:
+        client = RqbitClient("http://rqbit:3030", http)
+        with pytest.raises(RqbitError) as ei:
+            await client.stats(0)
+        assert ei.value.status is None
+        store.upsert(movie())
+        await refresh(store, client, now=1100.0)
+    assert store.get(1).status == "downloading"
+
+
+@pytest.mark.anyio
+async def test_remove_deletes_whole_library_folder_for_nested_file(store, tmp_path):
+    movies = tmp_path / "movies"
+    nested = movies / "Sintel (2010)" / "Sub.Dir"
+    nested.mkdir(parents=True)
+    f = nested / "movie.mkv"
+    f.write_bytes(b"x")
+    store.upsert(movie(file_path=str(f)))
+    await remove_movie(store, StubRqbit(), movies, 1)
+    assert not (movies / "Sintel (2010)").exists() and movies.exists()
+
+
+@pytest.mark.anyio
+async def test_remove_logs_rmtree_failure_and_still_deletes_row(store, tmp_path, monkeypatch, caplog):
+    movies, folder, f = _library(tmp_path)
+    store.upsert(movie(file_path=str(f)))
+
+    def fail(path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(shutil, "rmtree", fail)
+    with caplog.at_level(logging.WARNING, logger="cinema.downloads"):
+        await remove_movie(store, StubRqbit(), movies, 1)
+    assert "could not remove" in caplog.text
+    assert folder.exists() and store.get(1) is None
+
+
+def test_lifespan_runs_and_cancels_poller(settings, store):
+    from fastapi.testclient import TestClient
+
+    from cinema.main import create_app
+
+    store.upsert(movie())
+    called = []
+
+    class Recording(StubRqbit):
+        http = None
+
+        async def stats(self, tid):
+            called.append(tid)
+            return stats(progress_bytes=7)
+
+    app = create_app(settings, store=store, rqbit=Recording(), start_poller=True)
+    with TestClient(app):
+        deadline = time.time() + 5
+        while not called and time.time() < deadline:
+            time.sleep(0.01)
+        assert called
+    assert store.get(1).progress_bytes == 7

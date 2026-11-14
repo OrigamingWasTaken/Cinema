@@ -14,7 +14,7 @@ def _eta_secs(remaining) -> int | None:
 
 
 class RqbitError(Exception):
-    def __init__(self, status: int, text: str):
+    def __init__(self, status: int | None, text: str):
         super().__init__(f"rqbit error {status}: {text}")
         self.status = status
         self.text = text
@@ -82,7 +82,10 @@ class RqbitClient:
         return self._http
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        resp = await self._http.request(method, self._base + path, **kwargs)
+        try:
+            resp = await self._http.request(method, self._base + path, **kwargs)
+        except httpx.HTTPError as e:
+            raise RqbitError(None, f"{type(e).__name__}: {e}") from e
         if not resp.is_success:
             raise RqbitError(resp.status_code, resp.text)
         return resp
