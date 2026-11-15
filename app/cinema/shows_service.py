@@ -131,9 +131,21 @@ class ShowsService:
             waited += 1.0
 
     @staticmethod
-    def _set_season_monitored(series: SonarrSeries, season: int, monitored: bool) -> list[dict]:
-        return [{**s, "monitored": monitored} if s.get("seasonNumber") == season else s
+    def _set_seasons_monitored(series: SonarrSeries, seasons: set[int],
+                               monitored: bool) -> list[dict]:
+        return [{**s, "monitored": monitored} if s.get("seasonNumber") in seasons else s
                 for s in series.raw.get("seasons") or []]
+
+    def _set_season_monitored(self, series: SonarrSeries, season: int,
+                              monitored: bool) -> list[dict]:
+        return self._set_seasons_monitored(series, {season}, monitored)
+
+    @staticmethod
+    def _unaired_seasons(series: SonarrSeries, episodes: list[SonarrEpisode],
+                         now: float) -> set[int]:
+        """Seasons (specials aside) with no aired episode: what Follow downloads as it airs."""
+        aired = {e.season for e in episodes if _is_aired(e, now)}
+        return {s.number for s in series.seasons if s.number != 0 and s.number not in aired}
 
     async def page(self, tmdb_id: int) -> dict:
         info = await self.tmdb.tv(tmdb_id)
@@ -217,8 +229,19 @@ class ShowsService:
                 # (it needs its episodes) before looking at the airing season.
                 series = await self._add(info, monitor="future", monitor_new_items="all")
                 series = await self._wait_for_refresh(series)
-            else:
+            elif series.raw.get("addOptions") is not None:
                 series = await self.sonarr.update_series(series, monitorNewItems="all")
+            else:
+                # monitorNewItems only covers seasons Sonarr discovers later: a next season
+                # TVDB already lists is monitored here, so it downloads as it airs.
+                episodes = await self.sonarr.episodes(series.id)
+                future = self._unaired_seasons(series, episodes, self.now())
+                series = await self.sonarr.update_series(
+                    series, monitorNewItems="all",
+                    seasons=self._set_seasons_monitored(series, future, True))
+                ids = [e.id for e in episodes if e.season in future and not e.monitored]
+                if ids:
+                    await self.sonarr.monitor_episodes(ids, True)
             if series.raw.get("addOptions") is not None:
                 # Sonarr never finished its first refresh; it will apply the add options
                 # (and the airing season's search) itself, and episodes may not exist yet.
@@ -241,7 +264,20 @@ class ShowsService:
             info = await self.tmdb.tv(tmdb_id)
             series = await self._existing(info.tvdb_id) if info.tvdb_id else None
             if series is not None:
-                await self.sonarr.update_series(series, monitorNewItems="none")
+                # Undo what Follow monitored ahead of time; seasons asked for with Get
+                # season, or with files, are left alone.
+                episodes = await self.sonarr.episodes(series.id)
+                with_files = {e.season for e in episodes if e.has_file}
+                untouched = {
+                    n for n in self._unaired_seasons(series, episodes, self.now())
+                    if n not in with_files
+                    and self.store.season_requested_at(tmdb_id, n) is None}
+                await self.sonarr.update_series(
+                    series, monitorNewItems="none",
+                    seasons=self._set_seasons_monitored(series, untouched, False))
+                ids = [e.id for e in episodes if e.season in untouched and e.monitored]
+                if ids:
+                    await self.sonarr.monitor_episodes(ids, False)
         return await self.page(tmdb_id)
 
     async def remove_season(self, tmdb_id: int, season: int) -> dict:

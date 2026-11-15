@@ -260,10 +260,14 @@ async def test_follow_airing_also_gets_current_season(env):
     env.fake.episodes = [ep_dict(101, 1, file_id=9), ep_dict(102, 1, aired=False),
                          ep_dict(201, 2, aired=False)]
     page = await env.follow(TMDB)
-    assert writes(env.fake) == [("PUT", "/api/v3/series/5"), ("PUT", "/api/v3/series/5"),
-                                ("PUT", "/api/v3/episode/monitor"), ("POST", "/api/v3/command")]
+    assert writes(env.fake) == [("PUT", "/api/v3/series/5"), ("PUT", "/api/v3/episode/monitor"),
+                                ("PUT", "/api/v3/series/5"), ("PUT", "/api/v3/episode/monitor"),
+                                ("POST", "/api/v3/command")]
     assert env.fake.calls[0][2]["monitorNewItems"] == "all"
-    assert env.fake.calls[3][2]["seasonNumber"] == 1
+    assert env.fake.calls[1][2] == {"episodeIds": [201], "monitored": True}  # next season
+    assert env.fake.calls[4][2]["seasonNumber"] == 1
+    assert {s["seasonNumber"]: s["monitored"] for s in env.fake.series[5]["seasons"]} == \
+        {0: False, 1: True, 2: True}
     assert page["following"] is True
 
 
@@ -336,8 +340,15 @@ async def test_follow_between_seasons_downloads_nothing(env):
     env.fake.series[5] = series_dict()
     env.fake.episodes = [ep_dict(101, 1, file_id=9), ep_dict(201, 2, aired=False),
                          ep_dict(202, 2, aired=False)]
-    await env.follow(TMDB)
-    assert writes(env.fake) == [("PUT", "/api/v3/series/5")]
+    page = await env.follow(TMDB)
+    # Nothing is searched or downloaded now...
+    assert writes(env.fake) == [("PUT", "/api/v3/series/5"), ("PUT", "/api/v3/episode/monitor")]
+    # ...but the next season TVDB already lists is monitored, so it downloads as it airs.
+    assert {s["seasonNumber"]: s["monitored"] for s in env.fake.series[5]["seasons"]} == \
+        {0: False, 1: False, 2: True}
+    assert monitored(env.fake) == [(2, 1), (2, 2)]
+    assert page["following"] is True
+    assert [s["state"] for s in page["seasons"]] == ["done", "upcoming"]
 
 
 @pytest.mark.anyio
@@ -355,6 +366,38 @@ async def test_unfollow_only_changes_monitor_new_items(env):
     assert writes(env.fake) == [("PUT", "/api/v3/series/5")]
     assert env.fake.calls[0][2]["monitorNewItems"] == "none"
     assert page["following"] is False
+
+
+@pytest.mark.anyio
+async def test_unfollow_unmonitors_future_seasons_follow_monitored(env):
+    env.fake.series[5] = {**series_dict(new_items="all"), "seasons": [
+        {"seasonNumber": 0, "monitored": False}, {"seasonNumber": 1, "monitored": True},
+        {"seasonNumber": 2, "monitored": True}, {"seasonNumber": 3, "monitored": True},
+        {"seasonNumber": 4, "monitored": True}]}
+    env.fake.episodes = [ep_dict(101, 1), ep_dict(201, 2, aired=False),
+                         ep_dict(301, 3, aired=False), ep_dict(401, 4, aired=False, file_id=9)]
+    for e in env.fake.episodes:
+        e["monitored"] = True
+    env.store.set_season_requested(TMDB, 3, NOW)  # asked for with Get season: kept
+    page = await env.unfollow(TMDB)
+    assert writes(env.fake) == [("PUT", "/api/v3/series/5"), ("PUT", "/api/v3/episode/monitor")]
+    assert env.fake.calls[0][2]["monitorNewItems"] == "none"
+    assert {s["seasonNumber"]: s["monitored"] for s in env.fake.series[5]["seasons"]} == \
+        {0: False, 1: True, 2: False, 3: True, 4: True}
+    assert env.fake.calls[1][2] == {"episodeIds": [201], "monitored": False}
+    assert page["following"] is False
+
+
+@pytest.mark.anyio
+async def test_follow_then_unfollow_between_seasons_restores_the_future_season(env):
+    env.tmdb_fake.shows[TMDB] = info(airing=True)
+    env.fake.series[5] = series_dict()
+    env.fake.episodes = [ep_dict(101, 1, file_id=9), ep_dict(201, 2, aired=False)]
+    await env.follow(TMDB)
+    assert monitored(env.fake) == [(2, 1)]
+    await env.unfollow(TMDB)
+    assert monitored(env.fake) == []
+    assert not any(s["monitored"] for s in env.fake.series[5]["seasons"])
 
 
 @pytest.mark.anyio
