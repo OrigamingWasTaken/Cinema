@@ -760,6 +760,40 @@ class TestMainOrder(unittest.TestCase):
         pc.return_value.add_sonarr_application.assert_called_once()
         pc.return_value.add_tv_indexers.assert_called_once()
 
+    def test_data_dirs_chowned_again_after_the_stack_starts(self):
+        # The old root rqbit may still write until `docker compose up` replaces it.
+        import setup
+        calls = mock.Mock()
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env")
+            cfg = os.path.join(d, "c")
+            write_env(env, {"DATA_PATH": d, "CONFIG_PATH": cfg})
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                with mock.patch.object(setup, "chown_tree", calls.chown), \
+                        mock.patch.object(setup, "migrate_prowlarr_config", return_value=False), \
+                        mock.patch.object(setup, "StackLauncher", calls.launcher), \
+                        mock.patch.object(setup, "ProwlarrConfigurator"), \
+                        mock.patch.object(setup, "SonarrConfigurator"), \
+                        mock.patch.object(setup, "verify_hardlinks", return_value=None), \
+                        mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
+                        mock.patch("time.sleep"), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    setup.main()
+            finally:
+                os.chdir(cwd)
+        order = [(name, args) for name, args, _ in calls.mock_calls
+                 if name in ("chown", "launcher().start", "launcher().wait_for_healthy")]
+        data = [("chown", (os.path.join(d, sub), "1024", "100"))
+                for sub in ("movies", "downloads", "shows")]
+        rqbit = ("chown", (os.path.join(cfg, "rqbit"), "1024", "100"))
+        sonarr = ("chown", (os.path.join(cfg, "sonarr"), "1024", "100"))
+        start = order.index(("launcher().start", ()))
+        self.assertEqual(order[:start], data + [rqbit, sonarr])
+        self.assertEqual(order[start + 1:start + 5], data + [rqbit])
+        self.assertEqual(order[start + 5][0], "launcher().wait_for_healthy")
+
 
 if __name__ == "__main__":
     unittest.main()

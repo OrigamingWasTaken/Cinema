@@ -88,6 +88,14 @@ def chown_tree(path: str, uid, gid):
             fix(os.path.join(root, name))
 
 
+def give_to_user(config: "EnvConfig", services: tuple) -> None:
+    """chown the data dirs and these services' config dirs to PUID:PGID (idempotent)."""
+    for d in DATA_DIRS:
+        chown_tree(os.path.join(config.data_path, d), config.puid, config.pgid)
+    for svc in services:
+        chown_tree(os.path.join(config.config_path, svc), config.puid, config.pgid)
+
+
 def prowlarr_running() -> bool:
     """True when a container named exactly `prowlarr` is running (the v1 one uses that name)."""
     result = subprocess.run(["sudo", docker_bin(), "ps", "-q", "-f", "name=^prowlarr$"],
@@ -595,10 +603,7 @@ def main():
     print("\n[Phase 2] Creating directories...")
     DirectorySetup(config.data_path, config.config_path).create()
     print("  Directories created.")
-    for d in DATA_DIRS:
-        chown_tree(os.path.join(config.data_path, d), config.puid, config.pgid)
-    for svc in ("rqbit", "sonarr"):
-        chown_tree(os.path.join(config.config_path, svc), config.puid, config.pgid)
+    give_to_user(config, ("rqbit", "sonarr"))
 
     if migrate_prowlarr_config(config.v1_config_path, config.config_path):
         print("  Copied the v1 Prowlarr config.")
@@ -606,6 +611,8 @@ def main():
     print("\n[Phase 3] Launching Docker stack...")
     launcher = StackLauncher()
     launcher.start()
+    # The old root rqbit may have written more until `up` replaced it.
+    give_to_user(config, ("rqbit",))
     launcher.wait_for_healthy()
     launcher.wait_for_config_files(config.config_path)
 
