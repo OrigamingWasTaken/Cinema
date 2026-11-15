@@ -47,24 +47,6 @@ async def test_movie_parses_fields():
 
 
 @pytest.mark.anyio
-async def test_search_passes_query_and_language():
-    seen = []
-
-    def handler(request):
-        seen.append(request)
-        return httpx.Response(200, json={"results": [
-            {"id": 1, "title": "Dune", "release_date": "2021-09-15", "poster_path": None},
-            {"id": 2, "title": "Odd", "release_date": "", "poster_path": "/o.jpg",
-             "backdrop_path": "/ob.jpg"}]})
-
-    cards = await make(handler).search("dune")
-    q = seen[0].url.params
-    assert seen[0].url.path == "/3/search/movie"
-    assert q["query"] == "dune" and q["language"] == "fr-FR" and q["include_adult"] == "false"
-    assert cards == [MovieCard(1, "Dune", 2021, None), MovieCard(2, "Odd", None, "/o.jpg", "/ob.jpg")]
-
-
-@pytest.mark.anyio
 async def test_trending_cached_for_an_hour():
     calls = []
     clock = Clock()
@@ -95,13 +77,13 @@ async def test_search_cache_is_per_query_and_ten_minutes():
         return httpx.Response(200, json={"results": []})
 
     client = make(handler, clock)
-    await client.search("a")
-    await client.search("b")
-    await client.search("a")
-    assert len(calls) == 2
+    await client.search_all("a")
+    await client.search_all("b")
+    await client.search_all("a")
+    assert len(calls) == 8
     clock.t = 601
-    await client.search("a")
-    assert len(calls) == 3
+    await client.search_all("a")
+    assert len(calls) == 12
 
 
 @pytest.mark.anyio
@@ -164,6 +146,7 @@ async def test_search_all_groups_and_filters():
     assert result.studios[0] == CompanyHit(21, "Logo", "/lg.png")
     assert result.collections == [CollectionHit(30, "Dune Collection", "/c.jpg", None)]
     assert len(seen) == 4
+    assert seen[0].url.params["include_adult"] == "false"
     for request in seen:
         assert request.url.params["query"] == "dune"
         assert request.url.params["language"] == "fr-FR"
@@ -183,6 +166,25 @@ async def test_search_all_partial_failure():
 
 
 @pytest.mark.anyio
+async def test_search_all_partial_result_is_not_cached():
+    state = {"movie_ok": False}
+
+    def handler(request):
+        if request.url.path == "/3/search/movie":
+            if not state["movie_ok"]:
+                return httpx.Response(500, text="boom")
+            return httpx.Response(200, json={"results": [
+                {"id": 1, "title": "Dune", "release_date": "2021-09-15"}]})
+        return httpx.Response(200, json={"results": []})
+
+    client = make(handler)
+    assert (await client.search_all("dune")).films == []
+    state["movie_ok"] = True
+    assert [f.id for f in (await client.search_all("dune")).films] == [1]
+    assert [f.id for f in (await client.search_all("dune")).films] == [1]
+
+
+@pytest.mark.anyio
 async def test_search_all_all_failing_raises():
     fail = {"/3/search/movie", "/3/search/person", "/3/search/company", "/3/search/collection"}
     with pytest.raises(TmdbError):
@@ -197,15 +199,41 @@ async def test_person_dedupes_cast_and_director():
                                              "known_for_department": "Directing"})
         assert request.url.path == "/3/person/5/movie_credits"
         return httpx.Response(200, json={
-            "cast": [{"id": 1, "title": "A", "popularity": 5.0, "release_date": "2000-01-01"},
-                     {"id": 2, "title": "B", "popularity": 9.0, "release_date": ""}],
-            "crew": [{"id": 1, "title": "A", "popularity": 5.0, "job": "Director"},
-                     {"id": 3, "title": "C", "popularity": 7.0, "job": "Director"},
-                     {"id": 4, "title": "D", "popularity": 99.0, "job": "Producer"}]})
+            "cast": [{"id": 1, "title": "A", "popularity": 5.0, "release_date": "2000-01-01",
+                      "poster_path": "/a.jpg"},
+                     {"id": 2, "title": "B", "popularity": 9.0, "release_date": "",
+                      "poster_path": "/b.jpg"}],
+            "crew": [{"id": 1, "title": "A", "popularity": 5.0, "job": "Director",
+                      "poster_path": "/a.jpg"},
+                     {"id": 3, "title": "C", "popularity": 7.0, "job": "Director",
+                      "poster_path": "/c.jpg"},
+                     {"id": 4, "title": "D", "popularity": 99.0, "job": "Producer",
+                      "poster_path": "/d.jpg"}]})
 
     person, films = await make(handler).person(5)
     assert person == PersonHit(5, "Denis", "/p.jpg", "Directing")
     assert [f.id for f in films] == [2, 3, 1]
+
+
+@pytest.mark.anyio
+async def test_person_drops_adult_and_posterless_and_caps():
+    def film(i, **kw):
+        return {"id": i, "title": f"F{i}", "popularity": float(i), "poster_path": "/p.jpg", **kw}
+
+    cast = [film(i) for i in range(1, 71)]
+    cast += [film(100, adult=True), film(101, poster_path=None), film(102, poster_path="")]
+
+    def handler(request):
+        if request.url.path == "/3/person/5":
+            return httpx.Response(200, json={"id": 5, "name": "D", "profile_path": None,
+                                             "known_for_department": "Acting"})
+        return httpx.Response(200, json={"cast": cast, "crew": []})
+
+    _, films = await make(handler).person(5)
+    ids = [f.id for f in films]
+    assert len(ids) == 60
+    assert ids[0] == 70 and ids[-1] == 11
+    assert not {100, 101, 102} & set(ids)
 
 
 @pytest.mark.anyio
@@ -252,9 +280,10 @@ async def test_collection_parts_sorted_by_date():
         assert request.url.path == "/3/collection/9"
         return httpx.Response(200, json={"id": 9, "name": "Saga", "poster_path": "/s.jpg",
                                          "backdrop_path": "/sb.jpg", "parts": [
-            {"id": 3, "title": "Three", "release_date": "2005-01-01"},
-            {"id": 4, "title": "Four", "release_date": ""},
-            {"id": 1, "title": "One", "release_date": "1999-01-01"}]})
+            {"id": 3, "title": "Three", "release_date": "2005-01-01", "poster_path": "/3.jpg"},
+            {"id": 4, "title": "Four", "release_date": "", "poster_path": "/4.jpg"},
+            {"id": 5, "title": "NoPoster", "release_date": "2001-01-01", "poster_path": None},
+            {"id": 1, "title": "One", "release_date": "1999-01-01", "poster_path": "/1.jpg"}]})
 
     collection, films = await make(handler).collection(9)
     assert collection == CollectionHit(9, "Saga", "/s.jpg", "/sb.jpg")

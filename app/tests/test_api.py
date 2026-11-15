@@ -123,6 +123,7 @@ async def test_search_and_detail(settings, tmp_path):
     client, store, _ = build(settings, tmp_path)
     r = await client.get("/api/search", params={"q": "dune"})
     assert [c["id"] for c in r.json()["films"]] == [693134, 5]
+    assert r.json()["results"] == r.json()["films"]
     detail = (await client.get("/api/movies/693134")).json()
     assert detail["movie"]["runtime"] == 166 and detail["library"] is None
     store.upsert(movie_row())
@@ -319,7 +320,7 @@ async def test_search_empty_query_no_tmdb_call(settings, tmp_path):
         return httpx.Response(200, json={"results": []})
     client, _, _ = build(settings, tmp_path, tmdb=handler)
     body = (await client.get("/api/search", params={"q": "  "})).json()
-    assert body == {"films": [], "people": [], "studios": [], "collections": []}
+    assert body == {"films": [], "results": [], "people": [], "studios": [], "collections": []}
     assert calls == []
 
 
@@ -329,7 +330,7 @@ async def test_person_page_cards_have_in_library(settings, tmp_path):
     store.upsert(movie_row())
     body = (await client.get("/api/people/7")).json()
     assert body["person"]["name"] == "Denis V"
-    assert [(c["id"], c["in_library"]) for c in body["films"]] == [(693134, True), (5, False)]
+    assert [(c["id"], c["in_library"]) for c in body["films"]] == [(693134, True)]  # OTHER has no poster
 
 
 @pytest.mark.anyio

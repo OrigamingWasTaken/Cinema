@@ -84,6 +84,7 @@ class Paged:
 
 
 MAX_PAGES = 500
+PERSON_FILM_CAP = 60
 
 
 def _year(release_date) -> int | None:
@@ -148,6 +149,17 @@ class TmdbClient:
         self._cache[key] = (now, value)
         return value
 
+    async def _cached_if(self, key: tuple, ttl: float, fetch):
+        """Like _cached, but fetch returns (value, cacheable)."""
+        hit = self._cache.get(key)
+        now = self._now()
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+        value, cacheable = await fetch()
+        if cacheable:
+            self._cache[key] = (now, value)
+        return value
+
     async def _cards(self, path: str, **params) -> list[MovieCard]:
         data = await self._get(path, **params)
         return [_card(item) for item in data.get("results", [])]
@@ -158,11 +170,6 @@ class TmdbClient:
 
     async def popular(self) -> list[MovieCard]:
         return await self._cached(("popular",), HOUR, lambda: self._cards("/movie/popular"))
-
-    async def search(self, query: str) -> list[MovieCard]:
-        return await self._cached(
-            ("search", query), SEARCH_TTL,
-            lambda: self._cards("/search/movie", query=query, include_adult="false"))
 
     async def movie(self, tmdb_id: int) -> MovieInfo:
         async def fetch() -> MovieInfo:
@@ -175,7 +182,7 @@ class TmdbClient:
         return await self._cached(("movie", tmdb_id), HOUR, fetch)
 
     async def search_all(self, query: str) -> SearchAll:
-        async def fetch() -> SearchAll:
+        async def fetch() -> tuple[SearchAll, bool]:
             params = {"query": query, "include_adult": "false"}
             results = await asyncio.gather(
                 self._get("/search/movie", **params),
@@ -183,11 +190,14 @@ class TmdbClient:
                 self._get("/search/company", **params),
                 self._get("/search/collection", **params),
                 return_exceptions=True)
-            failures = [r for r in results if isinstance(r, Exception)]
+            for r in results:
+                if isinstance(r, asyncio.CancelledError):
+                    raise r
+            failures = [r for r in results if isinstance(r, BaseException)]
             if len(failures) == len(results):
                 raise next((f for f in failures if isinstance(f, TmdbError)), failures[0])
             movies, people, studios, collections = (
-                {} if isinstance(r, Exception) else r for r in results)
+                {} if isinstance(r, BaseException) else r for r in results)
             wanted = query.casefold()
             ranked = sorted(
                 (p for p in people.get("results", [])
@@ -198,40 +208,46 @@ class TmdbClient:
             company_items = studios.get("results", [])
             company_items = ([c for c in company_items if c.get("logo_path")]
                              + [c for c in company_items if not c.get("logo_path")])[:6]
-            return SearchAll(
+            found = SearchAll(
                 [_card(m) for m in movies.get("results", [])],
                 [_person(p) for p in kept],
                 [_company(c) for c in company_items],
                 [_collection(c) for c in collections.get("results", [])[:6]])
-        return await self._cached(("search_all", query), SEARCH_TTL, fetch)
+            # A partial result is returned but never cached, so a retry can fill the gaps.
+            return found, not failures
+        return await self._cached_if(("search_all", query), SEARCH_TTL, fetch)
 
     async def person(self, person_id: int) -> tuple[PersonHit, list[MovieCard]]:
         async def fetch() -> tuple[PersonHit, list[MovieCard]]:
-            info = await self._get(f"/person/{person_id}")
-            credits = await self._get(f"/person/{person_id}/movie_credits")
+            info, credits = await asyncio.gather(
+                self._get(f"/person/{person_id}"),
+                self._get(f"/person/{person_id}/movie_credits"))
             items: dict[int, dict] = {}
             for item in credits.get("cast", []):
                 items.setdefault(item["id"], item)
             for item in credits.get("crew", []):
                 if item.get("job") == "Director":
                     items.setdefault(item["id"], item)
-            ordered = sorted(items.values(), key=lambda i: i.get("popularity") or 0,
-                             reverse=True)
+            shown = [i for i in items.values()
+                     if not i.get("adult") and i.get("poster_path")]
+            ordered = sorted(shown, key=lambda i: i.get("popularity") or 0,
+                             reverse=True)[:PERSON_FILM_CAP]
             return _person(info), [_card(i) for i in ordered]
         return await self._cached(("person", person_id), HOUR, fetch)
 
     async def company(self, company_id: int, page: int = 1) -> tuple[CompanyHit, Paged]:
         async def fetch() -> tuple[CompanyHit, Paged]:
-            info = await self._get(f"/company/{company_id}")
-            data = await self._get("/discover/movie", with_companies=company_id,
-                                   sort_by="popularity.desc", page=page)
+            info, data = await asyncio.gather(
+                self._get(f"/company/{company_id}"),
+                self._get("/discover/movie", with_companies=company_id,
+                          sort_by="popularity.desc", page=page))
             return _company(info), _paged(data, page)
         return await self._cached(("company", company_id, page), HOUR, fetch)
 
     async def collection(self, collection_id: int) -> tuple[CollectionHit, list[MovieCard]]:
         async def fetch() -> tuple[CollectionHit, list[MovieCard]]:
             d = await self._get(f"/collection/{collection_id}")
-            parts = sorted(d.get("parts", []),
+            parts = sorted((p for p in d.get("parts", []) if p.get("poster_path")),
                            key=lambda p: (not p.get("release_date"), p.get("release_date") or ""))
             return _collection(d), [_card(p) for p in parts]
         return await self._cached(("collection", collection_id), HOUR, fetch)

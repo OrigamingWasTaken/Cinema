@@ -157,10 +157,14 @@ def build_api_router(settings: Settings, store: Store, rqbit: RqbitClient,
     async def search(q: str = ""):
         query = q.strip()
         if not query:
-            return {"films": [], "people": [], "studios": [], "collections": []}
+            return {"films": [], "results": [], "people": [], "studios": [],
+                    "collections": []}
         found = await _call("tmdb", (TmdbError,), tmdb.search_all(query))
+        films = [_card(c, store) for c in found.films]
         return {
-            "films": [_card(c, store) for c in found.films],
+            "films": films,
+            # Alias of "films" for phones still running the old cached JS; remove later.
+            "results": films,
             "people": [asdict(p) for p in found.people],
             "studios": [asdict(s) for s in found.studios],
             "collections": [_collection_ref(c) for c in found.collections],
