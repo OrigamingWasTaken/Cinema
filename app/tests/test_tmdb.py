@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from cinema.tmdb import (CollectionHit, CompanyHit, Genre, MovieCard, Paged, PersonHit,
-                         TmdbClient, TmdbError)
+                         ShowCard, TmdbClient, TmdbError)
 
 MOVIE = {
     "id": 693134, "imdb_id": "tt15239678", "title": "Dune: Part Two",
@@ -80,10 +80,10 @@ async def test_search_cache_is_per_query_and_ten_minutes():
     await client.search_all("a")
     await client.search_all("b")
     await client.search_all("a")
-    assert len(calls) == 8
+    assert len(calls) == 10
     clock.t = 601
     await client.search_all("a")
-    assert len(calls) == 12
+    assert len(calls) == 15
 
 
 @pytest.mark.anyio
@@ -125,6 +125,10 @@ def _search_handler(seen, fail=()):
         "/3/search/collection": {"results": [
             {"id": 30, "name": "Dune Collection", "poster_path": "/c.jpg",
              "backdrop_path": None}]},
+        "/3/search/tv": {"results": [
+            {"id": 40, "name": "Dune: Prophecy", "first_air_date": "2024-11-17",
+             "poster_path": "/t.jpg", "backdrop_path": "/tb.jpg"},
+            {"id": 41, "name": "Other", "first_air_date": "", "poster_path": None}]},
     }
 
     def handler(request):
@@ -145,7 +149,9 @@ async def test_search_all_groups_and_filters():
     assert [c.id for c in result.studios] == [21, 20]
     assert result.studios[0] == CompanyHit(21, "Logo", "/lg.png")
     assert result.collections == [CollectionHit(30, "Dune Collection", "/c.jpg", None)]
-    assert len(seen) == 4
+    assert result.shows == [ShowCard(40, "Dune: Prophecy", 2024, "/t.jpg", "/tb.jpg"),
+                            ShowCard(41, "Other", None, None, None)]
+    assert len(seen) == 5
     assert seen[0].url.params["include_adult"] == "false"
     for request in seen:
         assert request.url.params["query"] == "dune"
@@ -185,8 +191,100 @@ async def test_search_all_partial_result_is_not_cached():
 
 
 @pytest.mark.anyio
+async def test_search_all_includes_shows():
+    result = await make(_search_handler([])).search_all("dune")
+    assert [s.id for s in result.shows] == [40, 41]
+
+
+@pytest.mark.anyio
+async def test_search_all_shows_failure_is_partial_and_uncached():
+    state = {"tv_ok": False}
+    base = _search_handler([])
+
+    def handler(request):
+        if request.url.path == "/3/search/tv" and not state["tv_ok"]:
+            return httpx.Response(500, text="boom")
+        return base(request)
+
+    client = make(handler)
+    first = await client.search_all("dune")
+    assert first.shows == [] and first.films
+    state["tv_ok"] = True
+    assert [s.id for s in (await client.search_all("dune")).shows] == [40, 41]
+
+
+SHOW = {
+    "id": 1396, "name": "Breaking Bad", "first_air_date": "2008-01-20",
+    "last_air_date": "2013-09-29", "in_production": False, "status": "Ended",
+    "original_language": "en", "overview": "A teacher...", "poster_path": "/p.jpg",
+    "backdrop_path": "/b.jpg", "genres": [{"id": 18, "name": "Drama"}],
+    "origin_country": ["US"], "external_ids": {"tvdb_id": 81189},
+}
+
+
+@pytest.mark.anyio
+async def test_tv_parses_airing_anime_and_tvdb():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={
+            **SHOW, "id": 37854, "name": "One Piece", "status": "Returning Series",
+            "in_production": True, "genres": [{"id": 16, "name": "Animation"}],
+            "origin_country": ["JP"], "original_language": "ja",
+            "external_ids": {"tvdb_id": 81797}})
+
+    info = await make(handler).tv(37854)
+    assert seen[0].url.path == "/3/tv/37854"
+    assert seen[0].url.params["append_to_response"] == "external_ids"
+    assert info.title == "One Piece" and info.year == 2008
+    assert info.airing is True and info.end_year is None
+    assert info.anime is True and info.tvdb_id == 81797
+    assert info.original_language == "ja" and info.poster_path == "/p.jpg"
+
+
+@pytest.mark.anyio
+async def test_tv_ended_has_end_year():
+    info = await make(lambda r: httpx.Response(200, json=SHOW)).tv(1396)
+    assert info.airing is False and info.end_year == 2013
+    assert info.anime is False and info.tvdb_id == 81189
+    nothing = await make(lambda r: httpx.Response(
+        200, json={**SHOW, "external_ids": {"tvdb_id": None}})).tv(1396)
+    assert nothing.tvdb_id is None
+
+
+@pytest.mark.anyio
+async def test_tv_404_is_tmdb_error_404():
+    with pytest.raises(TmdbError) as exc:
+        await make(lambda r: httpx.Response(404, text="nope")).tv(1)
+    assert exc.value.status == 404
+
+
+@pytest.mark.anyio
+async def test_tv_trending_and_popular_cached_for_an_hour():
+    seen = []
+    clock = Clock()
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"results": [
+            {"id": 1, "name": "A", "first_air_date": "2020-01-01", "poster_path": "/a.jpg"}]})
+
+    client = make(handler, clock)
+    assert await client.tv_trending() == [ShowCard(1, "A", 2020, "/a.jpg", None)]
+    await client.tv_trending()
+    await client.tv_popular()
+    await client.tv_popular()
+    assert seen == ["/3/trending/tv/week", "/3/tv/popular"]
+    clock.t = 3601.0
+    await client.tv_trending()
+    assert len(seen) == 3
+
+
+@pytest.mark.anyio
 async def test_search_all_all_failing_raises():
-    fail = {"/3/search/movie", "/3/search/person", "/3/search/company", "/3/search/collection"}
+    fail = {"/3/search/movie", "/3/search/person", "/3/search/company", "/3/search/collection",
+            "/3/search/tv"}
     with pytest.raises(TmdbError):
         await make(_search_handler([], fail=fail)).search_all("dune")
 

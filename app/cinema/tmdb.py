@@ -40,6 +40,30 @@ class MovieInfo:
 
 
 @dataclass(frozen=True)
+class ShowCard:
+    id: int
+    title: str
+    year: int | None
+    poster_path: str | None
+    backdrop_path: str | None = None
+
+
+@dataclass(frozen=True)
+class ShowInfo:
+    id: int
+    title: str
+    year: int | None
+    end_year: int | None
+    overview: str
+    original_language: str
+    poster_path: str | None
+    backdrop_path: str | None
+    airing: bool
+    anime: bool
+    tvdb_id: int | None
+
+
+@dataclass(frozen=True)
 class PersonHit:
     id: int
     name: str
@@ -74,6 +98,7 @@ class SearchAll:
     people: list[PersonHit]
     studios: list[CompanyHit]
     collections: list[CollectionHit]
+    shows: list[ShowCard]
 
 
 @dataclass(frozen=True)
@@ -96,6 +121,11 @@ def _year(release_date) -> int | None:
 def _card(item: dict) -> MovieCard:
     return MovieCard(item["id"], item["title"], _year(item.get("release_date")),
                      item.get("poster_path"), item.get("backdrop_path"))
+
+
+def _show_card(item: dict) -> ShowCard:
+    return ShowCard(item["id"], item["name"], _year(item.get("first_air_date")),
+                    item.get("poster_path"), item.get("backdrop_path"))
 
 
 def _person(item: dict) -> PersonHit:
@@ -181,6 +211,32 @@ class TmdbClient:
                 d.get("overview") or "", d.get("poster_path"), d.get("backdrop_path"))
         return await self._cached(("movie", tmdb_id), HOUR, fetch)
 
+    async def _show_cards(self, path: str) -> list[ShowCard]:
+        data = await self._get(path)
+        return [_show_card(item) for item in data.get("results", [])]
+
+    async def tv_trending(self) -> list[ShowCard]:
+        return await self._cached(("tv_trending",), HOUR,
+                                  lambda: self._show_cards("/trending/tv/week"))
+
+    async def tv_popular(self) -> list[ShowCard]:
+        return await self._cached(("tv_popular",), HOUR,
+                                  lambda: self._show_cards("/tv/popular"))
+
+    async def tv(self, tmdb_id: int) -> ShowInfo:
+        async def fetch() -> ShowInfo:
+            d = await self._get(f"/tv/{tmdb_id}", append_to_response="external_ids")
+            airing = bool(d.get("in_production")) or d.get("status") == "Returning Series"
+            anime = (16 in [g.get("id") for g in d.get("genres") or []]
+                     and "JP" in (d.get("origin_country") or []))
+            return ShowInfo(
+                d["id"], d["name"], _year(d.get("first_air_date")),
+                None if airing else _year(d.get("last_air_date")),
+                d.get("overview") or "", d.get("original_language") or "",
+                d.get("poster_path"), d.get("backdrop_path"), airing, anime,
+                (d.get("external_ids") or {}).get("tvdb_id") or None)
+        return await self._cached(("tv", tmdb_id), HOUR, fetch)
+
     async def search_all(self, query: str) -> SearchAll:
         async def fetch() -> tuple[SearchAll, bool]:
             params = {"query": query, "include_adult": "false"}
@@ -189,6 +245,7 @@ class TmdbClient:
                 self._get("/search/person", **params),
                 self._get("/search/company", **params),
                 self._get("/search/collection", **params),
+                self._get("/search/tv", **params),
                 return_exceptions=True)
             for r in results:
                 if isinstance(r, asyncio.CancelledError):
@@ -196,7 +253,7 @@ class TmdbClient:
             failures = [r for r in results if isinstance(r, BaseException)]
             if len(failures) == len(results):
                 raise next((f for f in failures if isinstance(f, TmdbError)), failures[0])
-            movies, people, studios, collections = (
+            movies, people, studios, collections, shows = (
                 {} if isinstance(r, BaseException) else r for r in results)
             wanted = query.casefold()
             ranked = sorted(
@@ -212,7 +269,8 @@ class TmdbClient:
                 [_card(m) for m in movies.get("results", [])],
                 [_person(p) for p in kept],
                 [_company(c) for c in company_items],
-                [_collection(c) for c in collections.get("results", [])[:6]])
+                [_collection(c) for c in collections.get("results", [])[:6]],
+                [_show_card(s) for s in shows.get("results", [])])
             # A partial result is returned but never cached, so a retry can fill the gaps.
             return found, not failures
         return await self._cached_if(("search_all", query), SEARCH_TTL, fetch)
