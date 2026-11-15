@@ -225,12 +225,12 @@ def plan_tv_indexers(existing: list) -> list:
     return [n for n in TV_INDEXERS if n not in have]
 
 
-class ProwlarrConfigurator:
-    BASE_URL = "http://localhost:9696"
-
-    def __init__(self, config_path: str):
-        config_xml = os.path.join(config_path, "prowlarr", "config.xml")
-        self.api_key = self.read_api_key(config_xml)
+class ArrClient:
+    """Shared HTTP plumbing for the Prowlarr and Sonarr APIs (subclasses set the class constants)."""
+    NAME = ""
+    BASE_URL = ""
+    API_PREFIX = ""
+    READY_TIMEOUT = 60
 
     @staticmethod
     def read_api_key(config_xml: str) -> str:
@@ -241,7 +241,7 @@ class ProwlarrConfigurator:
         return el.text
 
     def _request(self, method: str, path: str, body: Optional[dict] = None):
-        url = f"{self.BASE_URL}/api/v1{path}"
+        url = f"{self.BASE_URL}{self.API_PREFIX}{path}"
         data = json.dumps(body).encode() if body is not None else None
         req = Request(url, data=data, method=method)
         req.add_header("X-Api-Key", self.api_key)
@@ -251,14 +251,9 @@ class ProwlarrConfigurator:
         content = resp.read()
         return json.loads(content) if content else None
 
-    def _flaresolverr_tag_id(self) -> int:
-        for tag in self._request("GET", "/tag"):
-            if tag["label"] == "flaresolverr":
-                return tag["id"]
-        return self._request("POST", "/tag", {"label": "flaresolverr"})["id"]
-
-    def wait_until_ready(self, timeout: int = 60, interval: float = 3):
+    def wait_until_ready(self, timeout: Optional[int] = None, interval: float = 3):
         """Poll /system/status: docker-proxy accepts TCP before the app is up."""
+        timeout = self.READY_TIMEOUT if timeout is None else timeout
         deadline = time.time() + timeout
         while True:
             try:
@@ -266,9 +261,30 @@ class ProwlarrConfigurator:
                 return
             except Exception as e:
                 if time.time() >= deadline:
-                    print(f"  WARNING: Prowlarr API not ready after {timeout}s: {e}")
+                    print(f"  WARNING: {self.NAME} API not ready after {timeout}s: {e}")
                     return
                 time.sleep(interval)
+
+    @staticmethod
+    def _set_fields(schema: dict, values: dict) -> list:
+        return [dict(f, value=values[f["name"]]) if f["name"] in values else f
+                for f in schema.get("fields", [])]
+
+
+class ProwlarrConfigurator(ArrClient):
+    NAME = "Prowlarr"
+    BASE_URL = "http://localhost:9696"
+    API_PREFIX = "/api/v1"
+
+    def __init__(self, config_path: str):
+        config_xml = os.path.join(config_path, "prowlarr", "config.xml")
+        self.api_key = self.read_api_key(config_xml)
+
+    def _flaresolverr_tag_id(self) -> int:
+        for tag in self._request("GET", "/tag"):
+            if tag["label"] == "flaresolverr":
+                return tag["id"]
+        return self._request("POST", "/tag", {"label": "flaresolverr"})["id"]
 
     def configure(self):
         self.wait_until_ready()
@@ -325,9 +341,8 @@ class ProwlarrConfigurator:
                 "apiKey": sonarr_api_key,
                 "syncCategories": SONARR_SYNC_CATEGORIES,
             }
-            fields = [dict(f, value=values[f["name"]]) if f["name"] in values else f
-                      for f in schema.get("fields", [])]
-            body = dict(schema, name="Sonarr", syncLevel="fullSync", fields=fields, tags=[])
+            body = dict(schema, name="Sonarr", syncLevel="fullSync", tags=[],
+                        fields=self._set_fields(schema, values))
             self._request("POST", "/applications?forceSave=true", body)
             print("  Sonarr application added to Prowlarr")
         except Exception as e:
@@ -363,41 +378,17 @@ PROFILE_CUTOFF = "WEBDL-1080p"
 FRENCH_ONLY_SCORE = -10000
 
 
-class SonarrConfigurator:
+class SonarrConfigurator(ArrClient):
+    NAME = "Sonarr"
     BASE_URL = "http://localhost:8989"
+    API_PREFIX = "/api/v3"
+    READY_TIMEOUT = 120
 
     def __init__(self, config_path: str, puid: str, pgid: str):
         config_xml = os.path.join(config_path, "sonarr", "config.xml")
-        self.api_key = ProwlarrConfigurator.read_api_key(config_xml)
+        self.api_key = self.read_api_key(config_xml)
         self.puid = puid
         self.pgid = pgid
-
-    def _request(self, method: str, path: str, body=None):
-        url = f"{self.BASE_URL}/api/v3{path}"
-        data = json.dumps(body).encode() if body is not None else None
-        req = Request(url, data=data, method=method)
-        req.add_header("X-Api-Key", self.api_key)
-        req.add_header("Content-Type", "application/json")
-        resp = urlopen(req, timeout=60)
-        content = resp.read()
-        return json.loads(content) if content else None
-
-    def wait_until_ready(self, timeout: int = 120, interval: float = 3):
-        deadline = time.time() + timeout
-        while True:
-            try:
-                self._request("GET", "/system/status")
-                return
-            except Exception as e:
-                if time.time() >= deadline:
-                    print(f"  WARNING: Sonarr API not ready after {timeout}s: {e}")
-                    return
-                time.sleep(interval)
-
-    @staticmethod
-    def _set_fields(schema: dict, values: dict) -> list:
-        return [dict(f, value=values[f["name"]]) if f["name"] in values else f
-                for f in schema.get("fields", [])]
 
     def _ensure_root_folder(self):
         if any(r.get("path", "").rstrip("/") == "/data/shows"
@@ -502,18 +493,14 @@ class SonarrConfigurator:
 
 
 HARDLINK_TEST_NAME = ".cinema-link-test"
-HARDLINK_HELP = (
-    "ERROR: hardlinks from downloads/ to shows/ do not work, so imports would copy.\n"
-    "Likely causes: rqbit is not running as PUID:PGID from .env (check\n"
-    "`docker inspect -f '{{.Config.User}}' rqbit`), or the kernel setting\n"
-    "fs.protected_hardlinks blocks the link (try `sudo sysctl fs.protected_hardlinks=0`).\n"
-    "The stack is up; fix the cause and run setup again.")
 
 
-def verify_hardlinks(data_path: str, puid: str, pgid: str) -> bool:
-    """True when Sonarr (as PUID:PGID) can hardlink downloads/ into shows/ and rqbit runs as that user."""
+def verify_hardlinks(data_path: str, puid: str, pgid: str) -> Optional[str]:
+    """None when Sonarr (as PUID:PGID) can hardlink downloads/ into shows/ and rqbit runs as
+    that user; otherwise a one-line reason naming the failed check."""
     src = os.path.join(data_path, "downloads", HARDLINK_TEST_NAME)
     dst = os.path.join(data_path, "shows", HARDLINK_TEST_NAME)
+    want = f"{puid}:{pgid}"
 
     def remove_both():
         for p in (src, dst):
@@ -528,17 +515,26 @@ def verify_hardlinks(data_path: str, puid: str, pgid: str) -> bool:
             f.write("cinema link test")
         os.chown(src, int(puid), int(pgid))
         ln = subprocess.run(
-            ["sudo", docker_bin(), "exec", "-u", f"{puid}:{pgid}", "sonarr", "ln",
+            ["sudo", docker_bin(), "exec", "-u", want, "sonarr", "ln",
              f"/data/downloads/{HARDLINK_TEST_NAME}", f"/data/shows/{HARDLINK_TEST_NAME}"],
             capture_output=True, text=True)
-        linked = ln.returncode == 0 and os.stat(src).st_ino == os.stat(dst).st_ino
+        if ln.returncode != 0:
+            detail = (ln.stderr or "").strip() or f"exit code {ln.returncode}"
+            return (f"ln failed as {want} inside the sonarr container: {detail} "
+                    "(is sonarr running, and are downloads/ and shows/ writable by that user?)")
+        if os.stat(src).st_ino != os.stat(dst).st_ino:
+            return "the link has a different inode (the file was copied, not linked)"
         inspect = subprocess.run(
             ["sudo", docker_bin(), "inspect", "-f", "{{.Config.User}}", "rqbit"],
             capture_output=True, text=True)
-        rqbit_ok = inspect.returncode == 0 and inspect.stdout.strip() == f"{puid}:{pgid}"
-        return linked and rqbit_ok
-    except OSError:
-        return False
+        if inspect.returncode != 0:
+            return f"could not inspect the rqbit container: {(inspect.stderr or '').strip()}"
+        got = inspect.stdout.strip()
+        if got != want:
+            return f"rqbit runs as '{got}', expected PUID:PGID ({want})"
+        return None
+    except OSError as e:
+        return f"could not run the hardlink test: {e}"
     finally:
         remove_both()
 
@@ -629,8 +625,8 @@ def main():
     prowlarr.add_tv_indexers()
 
     print("\n[Phase 6] Checking hardlinks...")
-    hardlinks_ok = verify_hardlinks(config.data_path, config.puid, config.pgid)
-    if hardlinks_ok:
+    hardlink_problem = verify_hardlinks(config.data_path, config.puid, config.pgid)
+    if hardlink_problem is None:
         print("  Hardlinks work.")
 
     ip = detect_ip()
@@ -648,9 +644,10 @@ def main():
         print(line)
     print("  3. Settings -> Subtitles: auto-download, English.")
     print("  Infuse: Shows appear in the same share")
-    if not hardlinks_ok:
+    if hardlink_problem is not None:
         print()
-        print(HARDLINK_HELP)
+        print(f"ERROR: hardlinks from downloads/ to shows/ do not work: {hardlink_problem}")
+        print("Imports would copy files. The stack is up; fix this and run setup again.")
         sys.exit(1)
 
 

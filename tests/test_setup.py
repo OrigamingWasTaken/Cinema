@@ -438,11 +438,13 @@ class TestTvSetup(unittest.TestCase):
 
             with mock.patch("os.chown"), mock.patch("setup.docker_bin", return_value="/bin/docker"):
                 with mock.patch("subprocess.run", side_effect=runner("1024:100")):
-                    self.assertTrue(setup.verify_hardlinks(d, "1024", "100"))
+                    self.assertIsNone(setup.verify_hardlinks(d, "1024", "100"))
                 self.assertFalse(os.path.exists(src))
                 self.assertFalse(os.path.exists(dst))
                 with mock.patch("subprocess.run", side_effect=runner("")):
-                    self.assertFalse(setup.verify_hardlinks(d, "1024", "100"))  # wrong rqbit user
+                    reason = setup.verify_hardlinks(d, "1024", "100")  # wrong rqbit user
+                    self.assertIn("rqbit runs as ''", reason)
+                    self.assertIn("1024:100", reason)
                 self.assertFalse(os.path.exists(src))
                 self.assertFalse(os.path.exists(dst))
 
@@ -463,7 +465,7 @@ class TestTvSetup(unittest.TestCase):
             import shutil as _sh
             shutil_copy = _sh.copyfile
             with mock.patch("os.chown"), mock.patch("subprocess.run", side_effect=fake):
-                self.assertFalse(setup.verify_hardlinks(d, "1024", "100"))
+                self.assertIn("different inode", setup.verify_hardlinks(d, "1024", "100"))
             self.assertFalse(os.path.exists(src))
             self.assertFalse(os.path.exists(dst))
 
@@ -477,7 +479,9 @@ class TestTvSetup(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 1, stdout="1024:100\n", stderr="denied")
 
             with mock.patch("os.chown"), mock.patch("subprocess.run", side_effect=fake):
-                self.assertFalse(setup.verify_hardlinks(d, "1024", "100"))
+                reason = setup.verify_hardlinks(d, "1024", "100")
+            self.assertIn("ln failed", reason)
+            self.assertIn("denied", reason)
             self.assertEqual(os.listdir(os.path.join(d, "downloads")), [])
 
     def test_compose_pins_sonarr_and_rqbit_user(self):
@@ -731,7 +735,8 @@ class TestMainOrder(unittest.TestCase):
                         mock.patch.object(setup, "StackLauncher"), \
                         mock.patch.object(setup, "ProwlarrConfigurator") as pc, \
                         mock.patch.object(setup, "SonarrConfigurator") as sc, \
-                        mock.patch.object(setup, "verify_hardlinks", return_value=False), \
+                        mock.patch.object(setup, "verify_hardlinks",
+                                          return_value="rqbit runs as '', expected PUID:PGID (1024:100)"), \
                         mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
                         mock.patch("time.sleep"), \
                         contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
@@ -739,8 +744,8 @@ class TestMainOrder(unittest.TestCase):
             finally:
                 os.chdir(cwd)
         self.assertNotEqual(cm.exception.code, 0)
-        self.assertIn("fs.protected_hardlinks", out.getvalue())
-        self.assertIn("PUID:PGID", out.getvalue())
+        self.assertIn("rqbit runs as '', expected PUID:PGID (1024:100)", out.getvalue())
+        self.assertNotIn("sysctl", out.getvalue())
         sc.return_value.configure.assert_called_once()
         pc.return_value.add_sonarr_application.assert_called_once()
         pc.return_value.add_tv_indexers.assert_called_once()
