@@ -46,9 +46,22 @@
     document.title = "Cinema";
   });
 
+  // Closing the sheet goes back one history entry. Two closers can fire for one
+  // sheet (a confirmed pick, and the film turning up on the server), so only the
+  // first one counts until the route has actually changed.
+  let closing = false;
+  $effect(() => {
+    if (!sheet) closing = false;
+  });
+  function closeSheet() {
+    if (!sheet || closing) return;
+    closing = true;
+    goBack(`#/movie/${id}`);
+  }
+
   // The More sheet is only for a film that is not (or no longer) on the server.
   $effect(() => {
-    if (sheet && movie && !canGet) untrack(() => goBack(`#/movie/${id}`));
+    if (sheet && movie && !canGet) untrack(closeSheet);
   });
 
   async function get() {
@@ -151,7 +164,7 @@
     </div>
 
     {#if sheet && canGet}
-      <MoreSheet {id} title={movie.title} onclose={() => goBack(`#/movie/${id}`)} />
+      <MoreSheet {id} title={movie.title} onclose={closeSheet} />
     {/if}
   {/if}
 </article>
