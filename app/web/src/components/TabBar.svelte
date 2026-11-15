@@ -1,19 +1,19 @@
 <script lang="ts">
   import { catalog } from "../lib/catalog.svelte";
   import { t, type StringKey } from "../lib/i18n";
-  import { router, selectTab, tabHref, TABS, type Tab } from "../lib/router.svelte";
+  import { onTab, router, selectTab, tabHref, TABS, type Tab } from "../lib/router.svelte";
   import { ui } from "../lib/ui.svelte";
   import Icon from "./Icon.svelte";
 
   const LABELS: Record<Tab, StringKey> = {
-    home: "tab_home", search: "tab_search", library: "tab_library", downloads: "tab_downloads",
+    films: "tab_films", shows: "tab_shows", search: "tab_search", library: "tab_library", downloads: "tab_downloads",
   };
 
   function tap(event: MouseEvent, tab: Tab) {
     event.preventDefault();
     selectTab(tab);
     // Focus inside the tap itself: iOS only raises the keyboard from a user gesture.
-    if (tab === "search" && router.route.movie == null && router.route.browse == null) {
+    if (tab === "search" && onTab(router.route)) {
       const input = document.getElementById("search-input") as HTMLInputElement | null;
       if (input && !input.value) input.focus({ preventScroll: true });
     }
@@ -48,10 +48,11 @@
     left: 50%;
     bottom: calc(env(safe-area-inset-bottom) + 10px);
     transform: translateX(-50%);
-    width: min(calc(100% - 24px), 440px);
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    padding: 6px;
+    width: min(calc(100% - 20px), 460px);
+    /* Five tabs: each is as wide as its label, plus an equal share of the rest, so
+       "Téléchargements" fits on a 375 px phone without shrinking every label. */
+    display: flex;
+    padding: 5px;
     border-radius: 26px;
     background: rgb(32 26 40 / 0.72);
     -webkit-backdrop-filter: blur(22px) saturate(160%);
@@ -62,13 +63,15 @@
   }
   .tab {
     position: relative;
+    flex: 1 1 auto;
+    min-width: 44px;
     min-height: 52px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 3px;
-    border-radius: 20px;
+    border-radius: 21px;
     color: var(--usher);
     transition: color 0.2s ease, background-color 0.2s ease;
   }
@@ -78,7 +81,7 @@
   .label {
     font-size: 10.5px;
     font-weight: 600;
-    letter-spacing: 0.01em;
+    letter-spacing: 0;
     white-space: nowrap;
     max-width: 100%;
     overflow: hidden;
@@ -101,5 +104,7 @@
     text-align: center;
     box-shadow: 0 0 0 2px rgb(32 26 40);
   }
+  /* The smallest phones (320 px) still fit every label. */
+  @media (max-width: 340px) { .label { font-size: 9.5px; padding: 0; } }
   @media (prefers-reduced-motion: reduce) { .tab { transition: none; } }
 </style>

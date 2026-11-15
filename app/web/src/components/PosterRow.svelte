@@ -1,9 +1,10 @@
 <script lang="ts">
-  import type { Card } from "../lib/api";
-  import { catalog } from "../lib/catalog.svelte";
+  import type { Card, ShowCard } from "../lib/api";
+  import { catalog, shows } from "../lib/catalog.svelte";
   import PosterCard from "./PosterCard.svelte";
 
-  let { title, cards }: { title: string; cards: Card[] } = $props();
+  let { title, cards, kind = "movie" }:
+    { title: string; cards: Card[] | ShowCard[]; kind?: "movie" | "show" } = $props();
 </script>
 
 <section class="row">
@@ -12,7 +13,8 @@
     {#each cards as card, i (card.id)}
       <li>
         <PosterCard id={card.id} title={card.title} year={card.year} path={card.poster_path}
-                    state={catalog.state(card)} eager={i < 3} />
+                    state={kind === "show" ? shows.state(card) : catalog.state(card)} eager={i < 3}
+                    href={kind === "show" ? `#/show/${card.id}` : undefined} />
       </li>
     {/each}
   </ul>

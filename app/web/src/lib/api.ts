@@ -38,6 +38,7 @@ export interface Genre {
 
 export interface SearchData {
   films: Card[];
+  shows: ShowCard[];
   people: PersonRef[];
   studios: StudioRef[];
   collections: CollectionRef[];
@@ -65,8 +66,87 @@ export interface HomeData {
   library: LibraryItem[];
   trending: Card[];
   popular: Card[];
+  /** Episodes getting ready (newest first), and the ones that failed. */
+  episodes: EpisodeDownload[];
+  episodes_failed: EpisodeDownload[];
   disk: { free_bytes: number; total_bytes: number } | null;
   catalog_error?: boolean;
+}
+
+/** An episode being downloaded (or that failed), from /api/home. */
+export interface EpisodeDownload {
+  /** The show's TMDB id; null when Sonarr doesn't know it. */
+  show_id: number | null;
+  show_title: string;
+  poster_path: string | null;
+  season: number;
+  episode: number;
+  state: State;
+  percent: number;
+  eta_s: number | null;
+  may_buffer: boolean;
+}
+
+/** A show card. `in_library` means it has episodes on the server. */
+export interface ShowCard {
+  id: number;
+  title: string;
+  year: number | null;
+  poster_path: string | null;
+  backdrop_path: string | null;
+  in_library: boolean;
+}
+
+/** /api/shows. A failed Sonarr empties `yours` and `library`; a failed TMDB the rows. */
+export interface ShowsHome {
+  yours: ShowCard[];
+  library: ShowCard[];
+  trending: ShowCard[];
+  popular: ShowCard[];
+  sonarr_error?: boolean;
+  catalog_error?: boolean;
+}
+
+export type SeasonState =
+  | "none" | "upcoming" | "looking" | "not_found" | "downloading" | "done" | "partial";
+
+export interface EpisodeView {
+  number: number;
+  title: string;
+  /** Sonarr's ISO 8601 UTC air time, or null when unknown. */
+  air_date: string | null;
+  state: "on_tv" | "downloading" | "not_aired" | "missing";
+}
+
+export interface SeasonView {
+  number: number;
+  state: SeasonState;
+  on_tv: number;
+  total: number;
+  aired: number;
+  downloading: number;
+  /** null until the show is in the library (no episode list yet). */
+  episodes: EpisodeView[] | null;
+}
+
+export interface ShowInfo {
+  id: number;
+  title: string;
+  year: number | null;
+  /** The last year once the show has ended; null while airing. */
+  end_year: number | null;
+  overview: string;
+  poster_path: string | null;
+  backdrop_path: string | null;
+  airing: boolean;
+}
+
+/** /api/shows/{id}, and the answer to every season and follow action. */
+export interface ShowPage {
+  show: ShowInfo;
+  available: boolean;
+  following: boolean;
+  seasons: SeasonView[];
 }
 
 export interface MovieInfo {

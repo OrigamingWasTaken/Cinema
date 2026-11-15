@@ -38,7 +38,8 @@ const en = {
   close: "Close",
 
   // Added with the tabbed app.
-  tab_home: "Home",
+  tab_films: "Films",
+  tab_shows: "Shows",
   tab_search: "Search",
   tab_library: "Library",
   tab_downloads: "Downloads",
@@ -70,6 +71,15 @@ const en = {
   load_more: "Load more",
   films_with: "Films with {name}",
   browse_empty: "No films here yet",
+
+  // Added with TV shows.
+  your_shows: "Your shows",
+  shows: "Shows",
+  search_all: "Films, shows, people",
+  nothing_found: "Nothing found",
+  library_shows_empty_title: "No shows on the TV yet",
+  library_shows_empty: "Shows you get show up here once their first episodes are on the TV.",
+  find_show: "Find a show",
 };
 
 type Key = keyof typeof en;
@@ -110,7 +120,8 @@ const fr: Record<Key, string> = {
   back: "Retour",
   close: "Fermer",
 
-  tab_home: "Accueil",
+  tab_films: "Films",
+  tab_shows: "Séries",
   tab_search: "Rechercher",
   tab_library: "Bibliothèque",
   tab_downloads: "Téléchargements",
@@ -141,6 +152,14 @@ const fr: Record<Key, string> = {
   load_more: "Plus de résultats",
   films_with: "Films avec {name}",
   browse_empty: "Aucun film ici pour l'instant",
+
+  your_shows: "Vos séries",
+  shows: "Séries",
+  search_all: "Films, séries, personnes",
+  nothing_found: "Aucun résultat",
+  library_shows_empty_title: "Aucune série sur la TV pour l'instant",
+  library_shows_empty: "Les séries que vous prenez apparaissent ici dès que leurs premiers épisodes sont sur la TV.",
+  find_show: "Trouver une série",
 };
 
 export const STRINGS = { en, fr };

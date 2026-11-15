@@ -4,9 +4,10 @@
   import Icon from "./Icon.svelte";
   import Poster from "./Poster.svelte";
 
-  let { id, title, year, path, state = null, caption = false, eager = false }: {
+  // A film by default; a show passes its own href (#/show/{id}).
+  let { id, title, year, path, state = null, caption = false, eager = false, href = `#/movie/${id}` }: {
     id: number; title: string; year: number | null; path: string | null;
-    state?: State | null; caption?: boolean; eager?: boolean;
+    state?: State | null; caption?: boolean; eager?: boolean; href?: string;
   } = $props();
 
   const label = $derived(
@@ -15,7 +16,7 @@
       .filter(Boolean).join(", "));
 </script>
 
-<a class="card" href="#/movie/{id}" aria-label={label}>
+<a class="card" {href} aria-label={label}>
   <div class="art">
     <Poster {path} {title} {year} {eager} />
     {#if state === "done"}

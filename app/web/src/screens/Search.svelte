@@ -7,8 +7,8 @@
   import PosterGrid from "../components/PosterGrid.svelte";
   import Spinner from "../components/Spinner.svelte";
   import TileRow from "../components/TileRow.svelte";
-  import { api, ApiError, type Card, type Genre, type SearchData } from "../lib/api";
-  import { catalog } from "../lib/catalog.svelte";
+  import { api, ApiError, type Card, type Genre, type SearchData, type ShowCard } from "../lib/api";
+  import { catalog, shows } from "../lib/catalog.svelte";
   import { t } from "../lib/i18n";
   import { navigate, rememberQuery, router } from "../lib/router.svelte";
 
@@ -28,16 +28,22 @@
   const query = $derived(text.trim());
   const cards = (list: Card[]) =>
     list.map((c) => ({ id: c.id, title: c.title, year: c.year, path: c.poster_path, state: catalog.state(c) }));
+  const showCards = (list: ShowCard[]) =>
+    list.map((c) => ({
+      id: c.id, title: c.title, year: c.year, path: c.poster_path, state: shows.state(c), href: `#/show/${c.id}`,
+    }));
   const nothingFound = $derived(
-    !!results && !results.films.length && !results.people.length && !results.studios.length && !results.collections.length);
+    !!results && !results.films.length && !results.shows.length && !results.people.length &&
+    !results.studios.length && !results.collections.length);
 
-  // An exact name match (a person first, else a studio) goes above the films.
-  const lead = $derived.by((): "people" | "studios" | null => {
+  // An exact name match (a person first, else a studio, else a show) goes above the films.
+  const lead = $derived.by((): "people" | "studios" | "shows" | null => {
     if (!results) return null;
     const q = resultsFor.trim().toLowerCase();
     if (!q) return null;
     if (results.people.some((p) => p.name.trim().toLowerCase() === q)) return "people";
     if (results.studios.some((s) => s.name.trim().toLowerCase() === q)) return "studios";
+    if (results.shows.some((s) => s.title.trim().toLowerCase() === q)) return "shows";
     return null;
   });
 
@@ -73,6 +79,8 @@
     failed = false;
     try {
       results = await api<SearchData>(`/search?q=${encodeURIComponent(q)}`, { signal: mine.signal });
+      // Which shows are on the TV comes from /api/shows (search cards don't know).
+      if (results.shows.length && !shows.loaded) shows.refresh();
       resultsFor = q;
     } catch (err) {
       if (err instanceof ApiError && err.status === -1) return; // superseded
@@ -134,14 +142,14 @@
   <form class="field-wrap" role="search" onsubmit={submit}>
     <label class="field">
       <Icon name="search" size={20} />
-      <span class="sr-only">{t("search")}</span>
+      <span class="sr-only">{t("search_all")}</span>
       <input
         id="search-input"
         bind:this={input}
         bind:value={text}
         oninput={onInput}
         type="search"
-        placeholder={t("search")}
+        placeholder={t("search_all")}
         enterkeyhint="search"
         autocomplete="off"
         autocapitalize="off"
@@ -161,13 +169,21 @@
     <ErrorBlock retry={() => run(query)} />
   {:else if query && results && resultsFor}
     {#if nothingFound}
-      <EmptyState icon="search" title={t("no_results")} text={t("no_results_hint")} />
+      <EmptyState icon="search" title={t("nothing_found")} text={t("no_results_hint")} />
     {:else}
       {#snippet filmsGroup(r: SearchData)}
         {#if r.films.length}
           <section class="films">
             <h2 class="section-title">{t("films")}</h2>
             <PosterGrid items={cards(r.films)} />
+          </section>
+        {/if}
+      {/snippet}
+      {#snippet showsGroup(r: SearchData)}
+        {#if r.shows.length}
+          <section class="shows">
+            <h2 class="section-title">{t("shows")}</h2>
+            <PosterGrid items={showCards(r.shows)} />
           </section>
         {/if}
       {/snippet}
@@ -187,8 +203,13 @@
           {@render peopleGroup(results)}
         {:else if lead === "studios"}
           {@render studiosGroup(results)}
+        {:else if lead === "shows"}
+          {@render showsGroup(results)}
         {/if}
         {@render filmsGroup(results)}
+        {#if lead !== "shows"}
+          {@render showsGroup(results)}
+        {/if}
         {#if lead !== "people"}
           {@render peopleGroup(results)}
         {/if}
@@ -263,7 +284,9 @@
   .section-title { margin-top: 10px; }
   /* Whichever group comes first sits right under the field. */
   .results > :global(:first-child) { margin-top: 10px; }
-  .results > .films:first-child { margin-top: 0; }
+  .results > .films:first-child, .results > .shows:first-child { margin-top: 0; }
+  /* A grid group after another group: the same 28 px a row brings (with its title's 10). */
+  .results > :global(* + .films), .results > :global(* + .shows) { margin-top: 18px; }
   .genres { margin-bottom: 28px; }
   .chips {
     list-style: none;

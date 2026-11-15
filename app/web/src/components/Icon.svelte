@@ -1,7 +1,10 @@
 <script lang="ts" module>
   // 24×24 stroke icons, drawn for this app.
   const PATHS = {
-    home: "M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z",
+    // A clapperboard.
+    films: "M4.5 10h15v8.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5zM4.5 10l-.5-3a1.2 1.2 0 0 1 1-1.4l13-2.2a1.2 1.2 0 0 1 1.4 1l.4 2.3L4.5 10M8.6 5.2l2.3 3.3M13.6 4.4l2.3 3.3",
+    // A stack of screens: one show, many episodes.
+    shows: "M5.5 9.5h13a1.5 1.5 0 0 1 1.5 1.5v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5V11a1.5 1.5 0 0 1 1.5-1.5zM7 6.5h10M9.5 3.5h5",
     search: "M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM15.5 15.5 20 20",
     library: "M4 5.5h16v10H4zM8.5 19.5h7M12 15.5v4",
     downloads: "M12 4v10.5M7.5 10.5 12 15l4.5-4.5M5 19.5h14",

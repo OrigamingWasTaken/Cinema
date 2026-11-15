@@ -2,7 +2,7 @@
   import type { State } from "../lib/api";
   import PosterCard from "./PosterCard.svelte";
 
-  interface Item { id: number; title: string; year: number | null; path: string | null; state: State | null }
+  interface Item { id: number; title: string; year: number | null; path: string | null; state: State | null; href?: string }
   let { items }: { items: Item[] } = $props();
 </script>
 
