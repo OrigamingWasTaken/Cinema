@@ -125,6 +125,8 @@ export interface SeasonView {
   total: number;
   aired: number;
   downloading: number;
+  /** Sonarr monitors it: it was got (or followed) and not removed since. */
+  monitored: boolean;
   /** null until the show is in the library (no episode list yet). */
   episodes: EpisodeView[] | null;
 }

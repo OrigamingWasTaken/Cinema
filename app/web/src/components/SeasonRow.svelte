@@ -27,9 +27,10 @@
   const ACTIONS: Partial<Record<SeasonView["state"], StringKey>> = {
     none: "get_season", upcoming: "get_season", not_found: "try_again", partial: "get_rest",
   };
-  const action = $derived(ACTIONS[season.state] ?? null);
+  // A season already asked for that hasn't aired just waits: nothing to get yet.
+  const action = $derived(season.state === "upcoming" && season.monitored ? null : (ACTIONS[season.state] ?? null));
   // Anything on the TV, or a season the server is getting: it can be removed.
-  const removable = $derived(season.on_tv > 0 || ["looking", "not_found", "downloading"].includes(season.state));
+  const removable = $derived(season.on_tv > 0 || season.monitored);
   const episodes = $derived(season.episodes?.length ? season.episodes : null);
   const listId = $derived(`season-${season.number}-episodes`);
 

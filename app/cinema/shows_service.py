@@ -151,7 +151,7 @@ class ShowsService:
                 return unavailable
             seasons = [{"number": s.number, "state": "none", "on_tv": 0,
                         "total": s.episode_count, "aired": 0, "downloading": 0,
-                        "episodes": None}
+                        "monitored": False, "episodes": None}
                        for s in found.seasons if s.number != 0]
             return {"show": show, "available": True, "following": False, "seasons": seasons}
 
@@ -168,6 +168,7 @@ class ShowsService:
             state = season_state(
                 eps, monitored=s.monitored, queued=queued, number=s.number, now=now,
                 requested_at=self.store.season_requested_at(tmdb_id, s.number))
+            state["monitored"] = s.monitored
             state["episodes"] = [{"number": e.number, "title": e.title,
                                   "air_date": e.air_date_utc,
                                   "state": _episode_state(e, queued, now)} for e in eps]

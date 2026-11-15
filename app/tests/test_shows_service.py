@@ -164,6 +164,22 @@ async def test_page_hides_season_zero(env):
 
 
 @pytest.mark.anyio
+async def test_page_reports_season_monitored(env):
+    # Not in Sonarr yet: nothing is monitored.
+    env.fake.lookup[TVDB] = lookup_result()
+    page = await env.page(TMDB)
+    assert [s["monitored"] for s in page["seasons"]] == [False, False]
+    # In Sonarr: each season's own flag, including one requested but not aired yet.
+    env.fake.series[5] = series_dict(monitored=True)
+    env.fake.episodes = [ep_dict(101, 1, aired=False), ep_dict(201, 2)]
+    page = await env.page(TMDB)
+    assert [(s["number"], s["state"], s["monitored"]) for s in page["seasons"]] == \
+        [(1, "upcoming", True), (2, "none", False)]
+    page = await env.remove_season(TMDB, 1)
+    assert page["seasons"][0]["monitored"] is False
+
+
+@pytest.mark.anyio
 async def test_page_unavailable_without_tvdb(env):
     env.tmdb_fake.shows[TMDB] = info(tvdb=None)
     page = await env.page(TMDB)
