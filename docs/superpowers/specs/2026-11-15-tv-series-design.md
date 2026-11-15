@@ -21,8 +21,10 @@ Play-while-downloading is the top requirement ("playing while download is really
   - Each season row shows its state: not on the server → **Get season**; searching → "Looking for episodes…"; downloading → "Downloading 4 of 10 episodes"; done → "On the TV"; partly on the server → "7 of 10 on the TV" plus **Get the rest**.
   - Each season with anything on the server has **Remove** with a confirm. It deletes that season's files and stops monitoring it.
   - Tapping a season can expand its episode list (title, number, on the TV / downloading / not yet aired). Each episode is read-only: no per-episode download in v1.
-- **One season at a time** (user's choice). Getting a season downloads every aired episode of that season, preferring a season pack.
-- **Follow** appears only for shows that are still airing (TMDB `in_production` or status "Returning Series"). While followed, every new episode downloads by itself once it airs. Starting to follow also gets the current season's aired episodes, so nobody is left mid-season (my proposal, stated to the user). **Unfollow** stops new episodes and leaves existing files alone.
+- **Numbering** (my call, from the builder check): seasons and episodes use **Sonarr's (TVDB) numbering** everywhere: the show page's season and episode lists, Get season, Downloads labels and WebDAV names. TMDB supplies only search, artwork, overview and the Shows rows. TMDB and TVDB often disagree, for anime, shows released in "parts" and specials. Mixing them would make "Get season 3" download different episodes than the page shows. The page must never show TMDB numbering where it could disagree with what gets downloaded. Specials (season 0) are hidden.
+- **One season at a time** (user's choice). **Get season** monitors that whole season in Sonarr and searches it, preferring a season pack. On a season still airing, the remaining episodes of that season then arrive as they air, whether or not the show is followed (my call: "the whole season" is what was asked for). The season's "N" counts every episode of the season. Unaired episodes show their air date in the episode list, and "Get the rest" counts only aired ones.
+- **Follow** appears only for shows that are still airing (TMDB `in_production` or status "Returning Series"). While followed, every new season is monitored automatically, so its episodes download as they air. When Follow is tapped while a season is airing, that season also gets Get season, so nobody is left mid-season (my proposal, stated to the user). When Follow is tapped between seasons, nothing downloads until the next season starts; the finished latest season keeps its own Get season button (my call: no surprise 10–30 GB download). **Unfollow** stops new seasons and leaves existing files and already-requested seasons alone.
+- **Remove season** (my call) deletes that season's files and unmonitors it. Following continues for later seasons. The row goes back to Get season.
 - **Infuse:**
   - The same WebDAV share (`/dav`) gets a `Shows` folder next to `Movies`. Infuse needs no new share.
   - The layout is `Shows/<Show Title (Year)>/Season NN/<Show Title> - SNNENN.<ext>`, which Infuse's TV scraper recognises.
@@ -43,6 +45,7 @@ Play-while-downloading is the top requirement ("playing while download is really
 - Calendars or "airs tonight" notifications.
 - Subtitles (Infuse fetches them).
 - Exposing Sonarr's own web UI to the family. It stays reachable on the LAN for the admin only.
+- Importing episodes that already exist elsewhere on the NAS. The only ones found are two "The Agency" S01 episodes in a personal `SYNO1/VIDEO/MOVIES` share outside the cinema data folder. Those are left alone (my call). There is no v1 TV folder.
 
 ## Anti-goals (a failure even if it works)
 - An episode can't be played until its whole season finishes.
@@ -67,7 +70,13 @@ Play-while-downloading is the top requirement ("playing while download is really
 - **Paths:**
   - Sonarr mounts the same `${DATA_PATH}:/data` as rqbit, so download paths match with no remote path mapping.
   - The series root folder is `/data/shows`.
-  - Hardlinks need the download and the library on the same filesystem and the same mount, which this setup gives.
+  - Hardlinks need the download and the library on the same filesystem and the same mount, which this setup gives (one btrfs volume).
+  - **Hardlink permission (checked on the NAS on 2026-11-15):** rqbit runs as root today, so its files are owned by `0:0`, and DSM has `fs.protected_hardlinks=1`. Sonarr runs as 1024:100, so it can't hardlink root-owned files it can't write, and would silently copy instead. So:
+    - rqbit runs as `PUID:PGID`, via compose `user:` or the image's equivalent;
+    - setup gives that user its folders (`/data/downloads`, `/data/movies`, `/data/shows`);
+    - setup verifies one test hardlink (same inode) and stops with a clear message if it fails.
+
+    Existing root-owned finished films are left as they are. The builder verifies that rqbit still resumes and serves them.
 - **Setup** (`setup.py`, run with sudo on the NAS) must configure Sonarr end to end, with no clicking in Sonarr's UI:
   - read Sonarr's API key from its config.xml;
   - set the root folder, the quality profile (rules above, upgrades off) and the RQBit download client;
@@ -107,7 +116,7 @@ WebDAV /dav/Shows ◄────────────┘ reads Sonarr queue 
   - list episodes and episode files;
   - list the queue with episode details;
   - delete episode files.
-- **Show metadata from TMDB** (existing `TmdbClient`): `/search/tv`, `/tv/{id}`, `/tv/{id}/season/{n}`, `/tv/{id}/external_ids` (for `tvdb_id`), and trending and popular TV. A show with no `tvdb_id` can't be added, so its page shows a friendly "not available" line instead of the buttons.
+- **Show metadata from TMDB** (existing `TmdbClient`): `/search/tv`, `/tv/{id}`, `/tv/{id}/external_ids` (for `tvdb_id`), and trending and popular TV. A show with no `tvdb_id`, or one Sonarr's lookup can't find, can't be added, so its page shows a friendly "not available" line instead of the buttons. Season and episode lists come from Sonarr (see Numbering). The builder decides how to get them for a show not yet added: from Sonarr's lookup, or by adding the series unmonitored when first needed.
 - **Phone API** (new GET/POST endpoints, same error conventions as films: 502 with `{"error":"upstream","service":"tmdb"|"sonarr"}`, 404 for an unknown id):
   - a show page with per-season and per-episode state merged from TMDB and Sonarr;
   - Get season;
