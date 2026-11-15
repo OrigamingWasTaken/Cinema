@@ -10,7 +10,7 @@ import functools
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
@@ -32,6 +32,7 @@ DELETE_AFTER_FINISH_SECONDS = 60
 FAILED_KEEP_SECONDS = 24 * 3600
 LISTED_STATES = ("ready", "done")
 _REFRESH_ERRORS = (SonarrError, RqbitError, httpx.HTTPError, KeyError, TypeError, ValueError)
+_ACTION_ERRORS = (SonarrError, RqbitError, httpx.HTTPError)
 
 
 @dataclass(frozen=True)
@@ -197,8 +198,13 @@ class ShowsTracker:
             row = rows.get(h)
             if t is None or (row is not None and row.status == "failed"):
                 continue
-            files = await self._torrent_files(h, t)
-            stats = await self.rqbit.stats(t.id)
+            try:
+                files = await self._torrent_files(h, t)
+                stats = await self.rqbit.stats(t.id)
+            except RqbitError as e:
+                if e.status != 404:
+                    raise
+                continue  # removed between list_torrents and now: skip it this cycle
             row = rows[h] = await self._track(row, h, t, items, stats, now)
             s = series.get(items[0].series_id)
             if row.status != "failed" and s is not None:
@@ -213,9 +219,13 @@ class ShowsTracker:
                 self.store.delete_show_download(h)
                 del rows[h]
                 continue
-            stats = await self.rqbit.stats(t.id)
-            if stats.finished:
-                await self._pause_finished(t, stats)
+            try:
+                stats = await self.rqbit.stats(t.id)
+            except RqbitError as e:
+                if e.status != 404:
+                    raise
+                continue
+            if stats.finished and await self._pause_finished(t, stats):
                 rows[h] = replace(row, torrent_id=t.id, status="finished", finished_at=now)
                 self.store.upsert_show_download(rows[h])
 
@@ -242,9 +252,21 @@ class ShowsTracker:
             self._files[key] = await self.rqbit.files(t.id)
         return self._files[key]
 
-    async def _pause_finished(self, t: TorrentSummary, stats: TorrentStats) -> None:
-        if stats.state != "paused":
-            await self.rqbit.pause(t.id)
+    @staticmethod
+    async def _act(what: str, action: Awaitable[None]) -> bool:
+        """Run one torrent's side effect. A failure only skips it until the next cycle:
+        the snapshot must not freeze because one torrent's action keeps failing."""
+        try:
+            await action
+        except _ACTION_ERRORS as e:
+            log.warning("could not %s, retrying next cycle: %s: %s", what, type(e).__name__, e)
+            return False
+        return True
+
+    async def _pause_finished(self, t: TorrentSummary, stats: TorrentStats) -> bool:
+        if stats.state == "paused":
+            return True
+        return await self._act(f"pause finished show torrent {t.id}", self.rqbit.pause(t.id))
 
     async def _track(self, row: ShowDownload | None, h: str, t: TorrentSummary,
                      items: list[QueueItem], stats: TorrentStats, now: float) -> ShowDownload:
@@ -260,15 +282,16 @@ class ShowsTracker:
                           episode_ids=sorted(episode_ids | set(row.episode_ids)),
                           progress_bytes=stats.progress_bytes,
                           last_progress_at=now if grew else row.last_progress_at)
+        # A failed action leaves the status as it was, so the next cycle retries it.
         if stats.finished:
-            await self._pause_finished(t, stats)
-            if row.status != "finished":
+            if await self._pause_finished(t, stats) and row.status != "finished":
                 row = replace(row, status="finished", finished_at=now)
         elif (row.status == "downloading" and stats.state == "live" and stats.live_peers == 0
               and stalled_since(row.last_progress_at, now, self.watch_started)):
             log.warning("show torrent %s stalled: blocklisting it in Sonarr", t.id)
-            await self.sonarr.remove_from_queue(items[0].id, blocklist=True)
-            row = replace(row, status="failed", finished_at=now)
+            if await self._act(f"blocklist stalled show torrent {t.id}",
+                               self.sonarr.remove_from_queue(items[0].id, blocklist=True)):
+                row = replace(row, status="failed", finished_at=now)
         self.store.upsert_show_download(row)
         return row
 
@@ -359,14 +382,19 @@ class ShowsTracker:
                     or self.open_streams[t.id] > 0 or self.open_streams[row.torrent_id] > 0
                     or not self._all_imported(row)):
                 continue
-            try:
-                await self.rqbit.delete(t.id)
-            except RqbitError as e:
-                if e.status != 404:
-                    raise
+            if not await self._act(f"remove imported show torrent {t.id}",
+                                   self._delete_torrent(t.id)):
+                continue
             log.info("removed imported show torrent %s", t.id)
             self.store.delete_show_download(h)
             del rows[h]
+
+    async def _delete_torrent(self, torrent_id: int) -> None:
+        try:
+            await self.rqbit.delete(torrent_id)
+        except RqbitError as e:
+            if e.status != 404:  # already gone counts as removed
+                raise
 
     def _failed(self, rows: dict[str, ShowDownload], groups: dict[str, list[QueueItem]],
                 series: dict[int, SonarrSeries], now: float) -> list[EpisodeEntry]:

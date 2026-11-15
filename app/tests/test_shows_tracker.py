@@ -397,3 +397,127 @@ async def test_run_shows_poller_starts_the_stall_clock_and_refreshes(env):
         await task
     assert env.tracker.watch_started >= before
     assert env.tracker.ok and len(env.tracker.listed()) == 1
+
+
+def failing(fake, method: str, path_suffix: str, status: int = 500) -> httpx.MockTransport:
+    """The fake's transport, except `method` on paths ending with `path_suffix` fails."""
+    fail = {"on": True}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if fail["on"] and request.method == method and request.url.path.endswith(path_suffix):
+            return httpx.Response(status, text="boom")
+        return await fake.transport.handler(request)
+
+    transport = httpx.MockTransport(handler)
+    transport.fail = fail
+    return transport
+
+
+def use_sonarr(env, transport):
+    env.tracker.sonarr = SonarrClient("http://sonarr:8989", "k",
+                                      httpx.AsyncClient(transport=transport))
+
+
+def use_rqbit(env, transport):
+    env.tracker.rqbit = RqbitClient("http://rqbit:3030", httpx.AsyncClient(transport=transport))
+
+
+def healthy_second_torrent(env, progress):
+    other = "cd" * 20
+    env.sonarr.episodes.append(ep_rec(102, 1, 2))
+    env.sonarr.queue.append(queue_rec(2, 102, 1, 2, download_id=other))
+    return env.rqbit.add_torrent(other, [(["Breaking.Bad.S01E02.mkv"], 500 * MIB)],
+                                 file_progress=[progress])
+
+
+@pytest.mark.anyio
+async def test_failing_blocklist_does_not_freeze_snapshot(env):
+    env.tracker.watch_started = 0.0
+    env.sonarr.episodes = [ep_rec(101, 1, 1)]
+    env.sonarr.queue = [queue_rec(1, 101, 1, 1)]
+    env.rqbit.add_torrent(HASH, [(["S01E01.mkv"], 500 * MIB)], file_progress=[0], live_peers=0)
+    other = healthy_second_torrent(env, 150 * MIB)
+    transport = failing(env.sonarr, "DELETE", "/api/v3/queue/1")
+    use_sonarr(env, transport)
+    await env.tracker.refresh()
+
+    for step, clock in enumerate([1601.0, 1606.0], start=1):
+        env.rqbit.torrents[other]["file_progress"] = [(150 + step * 10) * MIB]
+        env.clock[0] = clock
+        await env.tracker.refresh()
+        assert env.tracker.ok
+        assert [e.progress_bytes for e in env.tracker.listed()] == [(150 + step * 10) * MIB]
+        assert {r.info_hash: r.status for r in env.store.show_downloads()}[HASH] == \
+            "downloading"
+        assert env.tracker.failed == []
+
+    transport.fail["on"] = False
+    env.clock[0] = 1611.0
+    await env.tracker.refresh()
+    assert env.tracker.ok and [(e.episode, e.state) for e in env.tracker.failed] == \
+        [(1, "failed")]
+
+
+@pytest.mark.anyio
+async def test_failing_torrent_delete_does_not_freeze_snapshot(env, tmp_path):
+    env.sonarr.episodes = [ep_rec(101, 1, 1)]
+    env.sonarr.queue = [queue_rec(1, 101, 1, 1)]
+    tid = env.rqbit.add_torrent(HASH, [(["Breaking.Bad.S01E01.mkv"], 500 * MIB)],
+                                file_progress=[500 * MIB], finished=True)
+    await env.tracker.refresh()
+    env.sonarr.queue = []
+    env.import_file(tmp_path / "Breaking.Bad.S01E01.mkv", [101])
+    other = healthy_second_torrent(env, 150 * MIB)
+    env.tracker.invalidate(SID)
+    transport = failing(env.rqbit, "POST", f"/torrents/{tid}/delete")
+    use_rqbit(env, transport)
+
+    for step, clock in enumerate([1100.0, 1105.0], start=1):
+        env.rqbit.torrents[other]["file_progress"] = [(150 + step * 10) * MIB]
+        env.clock[0] = clock
+        await env.tracker.refresh()
+        assert env.tracker.ok
+        assert [(e.episode, e.progress_bytes) for e in env.tracker.listed()] == \
+            [(1, 500 * MIB), (2, (150 + step * 10) * MIB)]
+        assert not env.rqbit.torrents[tid]["deleted"]
+        assert HASH in {r.info_hash for r in env.store.show_downloads()}
+
+    transport.fail["on"] = False
+    env.clock[0] = 1110.0
+    await env.tracker.refresh()
+    assert env.rqbit.torrents[tid]["deleted"]
+    assert HASH not in {r.info_hash for r in env.store.show_downloads()}
+
+
+@pytest.mark.anyio
+async def test_failing_pause_leaves_row_downloading_and_retries(env):
+    env.sonarr.episodes = [ep_rec(101, 1, 1)]
+    env.sonarr.queue = [queue_rec(1, 101, 1, 1)]
+    tid = env.rqbit.add_torrent(HASH, [(["S01E01.mkv"], 500 * MIB)],
+                                file_progress=[500 * MIB], finished=True)
+    transport = failing(env.rqbit, "POST", f"/torrents/{tid}/pause")
+    use_rqbit(env, transport)
+    await env.tracker.refresh()
+    assert env.tracker.ok and len(env.tracker.listed()) == 1
+    assert [r.status for r in env.store.show_downloads()] == ["downloading"]
+    assert not env.rqbit.torrents[tid]["paused"]
+
+    transport.fail["on"] = False
+    env.clock[0] = 1005.0
+    await env.tracker.refresh()
+    assert env.rqbit.torrents[tid]["paused"]
+    [row] = env.store.show_downloads()
+    assert (row.status, row.finished_at) == ("finished", 1005.0)
+
+
+@pytest.mark.anyio
+async def test_torrent_vanishing_before_stats_is_skipped(env):
+    env.sonarr.episodes = [ep_rec(101, 1, 1)]
+    env.sonarr.queue = [queue_rec(1, 101, 1, 1)]
+    tid = env.rqbit.add_torrent(HASH, [(["S01E01.mkv"], 500 * MIB)], file_progress=[0])
+    healthy_second_torrent(env, 150 * MIB)
+    use_rqbit(env, failing(env.rqbit, "GET", f"/torrents/{tid}/stats/v1", status=404))
+    await env.tracker.refresh()
+    assert env.tracker.ok
+    assert [e.episode for e in env.tracker.listed()] == [2]
+    assert HASH not in {r.info_hash for r in env.store.show_downloads()}
