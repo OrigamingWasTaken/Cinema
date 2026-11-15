@@ -132,7 +132,7 @@
     {#if results.length}
       <PosterGrid items={cards(results)} />
     {:else}
-      <EmptyState title={t("no_results")} text={t("no_results_hint")} />
+      <EmptyState icon="search" title={t("no_results")} text={t("no_results_hint")} />
     {/if}
   {:else if !query}
     {#if catalog.popular.length}

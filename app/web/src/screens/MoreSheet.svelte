@@ -107,7 +107,7 @@
         {/each}
       </div>
     {:else}
-      <p class="none">{t("none_found")}</p>
+      <p class="none">{t("no_versions")}</p>
     {/if}
   {:else if loadFailed}
     <div class="flush"><ErrorBlock retry={() => load()} /></div>

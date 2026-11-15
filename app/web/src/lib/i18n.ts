@@ -57,6 +57,7 @@ const en = {
   downloads_empty: "Pick a film and tap Recommended. It shows up here while it gets ready.",
   try_another: "Try another version",
   choose_version: "Choose a version",
+  no_versions: "No versions found yet. Try again later.",
   minutes: "{m} min",
 };
 
@@ -118,6 +119,7 @@ const fr: Record<Key, string> = {
   downloads_empty: "Choisissez un film et touchez Recommandé. Il apparaît ici pendant sa préparation.",
   try_another: "Essayer une autre version",
   choose_version: "Choisir une version",
+  no_versions: "Aucune version trouvée pour l'instant. Réessayez plus tard.",
   minutes: "{m} min",
 };
 

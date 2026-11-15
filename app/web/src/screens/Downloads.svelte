@@ -20,7 +20,7 @@
     <ErrorBlock retry={() => catalog.refresh()} />
   {:else if catalog.loaded}
     {#if !catalog.active.length && !catalog.broken.length}
-      <EmptyState title={t("downloads_empty_title")} text={t("downloads_empty")} />
+      <EmptyState icon="downloads" title={t("downloads_empty_title")} text={t("downloads_empty")} />
     {/if}
 
     {#if catalog.active.length}
@@ -92,9 +92,11 @@
   .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .title {
     font: 600 17px/1.25 var(--serif);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .retry {
     display: inline-flex;

@@ -25,7 +25,7 @@
   {#if catalog.failed}
     <ErrorBlock retry={() => catalog.refresh()} />
   {:else if catalog.loaded && !items.length}
-    <EmptyState title={t("library_empty_title")} text={t("library_empty")}>
+    <EmptyState icon="library" title={t("library_empty_title")} text={t("library_empty")}>
       <button class="btn btn--secondary" type="button" onclick={findFilm}>
         <Icon name="search" size={20} />{t("find_film")}
       </button>

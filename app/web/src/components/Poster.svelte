@@ -22,6 +22,7 @@
     />
   {:else}
     <div class="tile" aria-hidden="true">
+      <span class="tile-initial">{title.trim().charAt(0)}</span>
       <span class="tile-title">{title}</span>
       {#if year}<span class="tile-year">{year}</span>{/if}
     </div>
@@ -79,9 +80,9 @@
       linear-gradient(180deg, var(--velvet), var(--aisle));
   }
   .tile-title {
-    font: 600 clamp(13px, 4.2cqw + 9px, 19px) / 1.15 var(--serif);
+    font: 600 clamp(10px, 8cqw + 5px, 19px) / 1.15 var(--serif);
     color: var(--screen);
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
     display: -webkit-box;
     -webkit-line-clamp: 4;
     line-clamp: 4;
@@ -89,6 +90,13 @@
     overflow: hidden;
   }
   .tile-year { font-size: 12px; color: var(--usher); }
+  .tile-initial { display: none; }
+  /* A thumbnail is too small for a title: show its initial instead. */
+  @container (max-width: 90px) {
+    .tile { justify-content: center; align-items: center; }
+    .tile-title, .tile-year { display: none; }
+    .tile-initial { display: block; font: 600 30cqw/1 var(--serif); color: rgb(244 238 230 / 0.7); }
+  }
   .poster:has(.tile)::before { display: none; }
   @keyframes sweep { from { background-position: 120% 0; } to { background-position: -120% 0; } }
   @media (prefers-reduced-motion: reduce) {

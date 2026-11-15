@@ -94,7 +94,7 @@
       <div class="bone bone--btn bone--btn2"></div>
     </div>
   {:else}
-    <div class="backdrop" class:poster-only={!movie.backdrop_path && movie.poster_path}>
+    <div class="backdrop" class:bare={!movie.backdrop_path && !movie.poster_path}>
       {#if art(movie)}
         <img src={art(movie)} alt="" class:loaded={artLoaded} onload={() => (artLoaded = true)} decoding="async" />
       {:else if movie.poster_path}
@@ -184,6 +184,10 @@
     height: min(62vh, 520px);
     overflow: hidden;
     background: linear-gradient(180deg, #2a2133, var(--curtain));
+  }
+  .backdrop.bare {
+    height: calc(env(safe-area-inset-top) + 230px);
+    background: radial-gradient(90% 70% at 50% 0%, rgb(243 194 107 / 0.1), transparent 70%), linear-gradient(180deg, #2a2133, var(--curtain));
   }
   .backdrop img {
     width: 100%;
