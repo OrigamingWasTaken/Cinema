@@ -3,14 +3,17 @@
   import type { EpisodeView, SeasonView } from "../lib/api";
   import { shortDate, shortDay, t, type StringKey } from "../lib/i18n";
   import { ms } from "../lib/motion";
+  import { playHref } from "../lib/router.svelte";
   import Icon from "./Icon.svelte";
   import Spinner from "./Spinner.svelte";
 
   // One season on the show page: its state, its one action (Get season, Get the rest,
   // Try again), Remove with a confirm, and its episodes on a tap. The page owns the
   // requests; `locked` disables every button while one is in flight.
-  let { season, locked, pending, failed, onget, onremove }: {
+  let { season, show, locked, pending, failed, onget, onremove }: {
     season: SeasonView;
+    /** The show's TMDB id, for the episodes' Play links. */
+    show: number;
     locked: boolean;
     /** This season's request in flight, if any. */
     pending: "get" | "remove" | null;
@@ -132,11 +135,17 @@
             <span class="ep-title">{ep.title || t("episode_n", { n: ep.number })}</span>
             {#if date}<span class="ep-date">{date}</span>{/if}
           </span>
-          <span class="ep-state">
-            {#if ep.state === "on_tv"}<Icon name="check" size={16} stroke={2.6} />
-            {:else if ep.state === "downloading"}<Spinner size={14} />{/if}
-            {#if label}<span class="sr-only">{t(label)}</span>{/if}
-          </span>
+          {#if ep.state === "on_tv"}
+            <a class="ep-play" href={playHref({ kind: "episode", show, season: season.number, episode: ep.number })}
+               aria-label="{t('play')}, {ep.title || t('episode_n', { n: ep.number })}">
+              <Icon name="play" size={16} stroke={1.4} />
+            </a>
+          {:else}
+            <span class="ep-state">
+              {#if ep.state === "downloading"}<Spinner size={14} />{/if}
+              {#if label}<span class="sr-only">{t(label)}</span>{/if}
+            </span>
+          {/if}
         </li>
       {/each}
     </ol>
@@ -224,10 +233,31 @@
   .ep-date { font-size: 13px; color: var(--usher); font-variant-numeric: tabular-nums; }
   .ep-state { flex: none; width: 20px; display: grid; place-items: center; color: var(--tungsten); }
   .ep--downloading .ep-state { color: var(--screen); }
+  /* On the TV: a play button where the check was, its 44 px target inside the row. */
+  .ep-play {
+    flex: none;
+    width: 44px;
+    height: 44px;
+    margin: -4px -10px -4px -4px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--tungsten);
+  }
+  .ep-play :global(svg) {
+    transition: background-color 0.15s ease;
+    width: 34px;
+    height: 34px;
+    padding: 9px 8px 9px 10px;
+    border-radius: 50%;
+    background: rgb(243 194 107 / 0.14);
+  }
+  .ep-play :global(path) { fill: currentColor; }
+  .ep-play:active :global(svg) { background: rgb(243 194 107 / 0.26); }
   .ep--not_aired .ep-title, .ep--missing .ep-title { color: #cfc6d8; }
   .ep--not_aired .ep-title { opacity: 0.75; }
 
   @media (prefers-reduced-motion: reduce) {
-    button.head, .chevron { transition: none; }
+    button.head, .chevron, .ep-play :global(svg) { transition: none; }
   }
 </style>

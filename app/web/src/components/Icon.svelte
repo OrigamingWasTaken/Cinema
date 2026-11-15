@@ -18,6 +18,10 @@
     chevron: "M9 5l7 7-7 7",
     clear: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9 9l6 6M15 9l-6 6",
     alert: "M12 8v5M12 16.5v.01M10.3 3.9 2.6 17.3A2 2 0 0 0 4.3 20.3h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
+    // A play triangle (filled where it starts something).
+    play: "M7.5 5.6v12.8a1 1 0 0 0 1.5.86l10.6-6.4a1 1 0 0 0 0-1.72L9 4.74a1 1 0 0 0-1.5.86z",
+    // Back to the start: a bar and a triangle pointing at it.
+    restart: "M6.5 5v14M18 5.8v12.4a.8.8 0 0 1-1.3.63L9 12.63a.8.8 0 0 1 0-1.26l7.7-6.2A.8.8 0 0 1 18 5.8z",
   } as const;
   export type IconName = keyof typeof PATHS;
 </script>

@@ -101,6 +101,13 @@ const en = {
   episode_n: "Episode {n}",
   episode_downloading: "Downloading",
   episode_not_aired: "Not out yet",
+
+  // Added with browser playback.
+  play: "Play",
+  resume_from: "Resume from {t}",
+  start_over: "Start over",
+  play_busy: "Two people are already watching in a browser — try again in a bit",
+  play_unsupported: "This one can't play in this browser — try Safari, or watch it on the TV",
 };
 
 type Key = keyof typeof en;
@@ -201,6 +208,12 @@ const fr: Record<Key, string> = {
   episode_n: "Épisode {n}",
   episode_downloading: "En téléchargement",
   episode_not_aired: "Pas encore sorti",
+
+  play: "Lecture",
+  resume_from: "Reprendre à {t}",
+  start_over: "Reprendre du début",
+  play_busy: "Deux personnes regardent déjà dans un navigateur — réessayez dans un moment",
+  play_unsupported: "Impossible de lire ce titre dans ce navigateur — essayez Safari, ou regardez-le sur la TV",
 };
 
 export const STRINGS = { en, fr };

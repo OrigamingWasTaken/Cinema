@@ -7,6 +7,8 @@
 //   #/library     Library        #/person/31       a person's films, over the current tab
 //   #/downloads   Downloads      #/studio/3        (also #/collection/10, #/genre/16)
 //
+//   #/play/movie/123  #/play/episode/1396/1/2   the player, over the film or show page
+//
 // A film opened from one of those pages sits over it: back returns to that page.
 import { flushSync, tick } from "svelte";
 
@@ -21,6 +23,11 @@ export interface Browse {
   id: number;
 }
 
+/** A film, or one episode by Sonarr's season and episode numbers. */
+export type PlayTarget =
+  | { kind: "movie"; id: number }
+  | { kind: "episode"; show: number; season: number; episode: number };
+
 export interface Route {
   tab: Tab;
   /** The browse page shown, or the one under the film page. */
@@ -30,6 +37,8 @@ export interface Route {
   show: number | null;
   sheet: boolean;
   q: string;
+  /** The player, shown over the film or show page it plays (kept mounted under it). */
+  play: PlayTarget | null;
 }
 
 /** Where a pushed page sits: its tab, and the browse page under a film page. */
@@ -51,24 +60,37 @@ const TAB_PATHS: Record<Tab, string> = {
 
 export const tabHref = (tab: Tab) => TAB_PATHS[tab];
 export const browseHref = (page: Browse) => `#/${page.kind}/${page.id}`;
+export const playHref = (p: PlayTarget) =>
+  p.kind === "movie" ? `#/play/movie/${p.id}` : `#/play/episode/${p.show}/${p.season}/${p.episode}`;
 
 /** A tab itself, with nothing pushed over it. */
 export const onTab = (r: Route) => r.movie == null && r.show == null && r.browse == null;
 
 function parse(hash: string, base: Base): Route {
   const [path, query = ""] = (hash.replace(/^#/, "") || "/").split("?");
+  const none = { movie: null, show: null, sheet: false, q: "", play: null };
   const movie = path.match(/^\/movie\/(\d+)(\/more)?\/?$/);
-  if (movie) return { ...base, movie: Number(movie[1]), show: null, sheet: Boolean(movie[2]), q: "" };
+  if (movie) return { ...base, ...none, movie: Number(movie[1]), sheet: Boolean(movie[2]) };
   const show = path.match(/^\/show\/(\d+)\/?$/);
-  if (show) return { ...base, movie: null, show: Number(show[1]), sheet: false, q: "" };
+  if (show) return { ...base, ...none, show: Number(show[1]) };
+  const playMovie = path.match(/^\/play\/movie\/(\d+)\/?$/);
+  if (playMovie) {
+    const id = Number(playMovie[1]);
+    return { ...base, ...none, movie: id, play: { kind: "movie", id } };
+  }
+  const playEpisode = path.match(/^\/play\/episode\/(\d+)\/(\d+)\/(\d+)\/?$/);
+  if (playEpisode) {
+    const [show, season, episode] = playEpisode.slice(1).map(Number);
+    return { ...base, ...none, show, play: { kind: "episode", show, season, episode } };
+  }
   const page = path.match(/^\/(person|studio|collection|genre)\/(\d+)\/?$/);
   if (page) {
     const browse = { kind: page[1] as BrowseKind, id: Number(page[2]) };
-    return { tab: base.tab, browse, movie: null, show: null, sheet: false, q: "" };
+    return { tab: base.tab, browse, ...none };
   }
   const tab = TABS.find((name) => name !== "films" && path === `/${name}`) ?? "films";
   const q = tab === "search" ? (new URLSearchParams(query).get("q") ?? "") : "";
-  return { tab, browse: null, movie: null, show: null, sheet: false, q };
+  return { tab, browse: null, ...none, q };
 }
 
 // Entries saved by an older version of the app may name a tab that no longer exists.
@@ -79,16 +101,18 @@ const entry = (): Partial<Entry> =>
 const baseOf = (r: Route): Base => ({ tab: r.tab, browse: r.browse && { kind: r.browse.kind, id: r.browse.id } });
 
 // A page opened from a link belongs with the tab it comes from: a browse page with
-// Search, a show with Shows, a film with Films.
+// Search, a show with Shows, a film with Films, the player with Library.
 const startTab: Tab = entry().tab ??
   (/^#\/(person|studio|collection|genre)\//.test(location.hash) ? "search"
-    : /^#\/show\//.test(location.hash) ? "shows" : "films");
+    : /^#\/show\//.test(location.hash) ? "shows"
+      : /^#\/play\//.test(location.hash) ? "library" : "films");
 
 export const router = $state<{ route: Route }>({
   route: parse(location.hash, { tab: startTab, browse: entry().browse ?? null }),
 });
 
-/** The view whose scroll position we remember: a tab, a browse page, one film or show page. */
+/** The view whose scroll position we remember: a tab, a browse page, one film or show page.
+ *  The player covers the page it plays, which keeps its own scroll underneath. */
 const viewKey = (r: Route) =>
   r.movie != null ? `movie/${r.movie}`
     : r.show != null ? `show/${r.show}`

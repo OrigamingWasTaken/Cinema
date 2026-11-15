@@ -182,7 +182,7 @@
       {#if page.available && page.seasons.length}
         <ol class="seasons" aria-live="polite">
           {#each page.seasons as season (season.number)}
-            <SeasonRow {season} locked={pending != null} pending={seasonPending(season.number)}
+            <SeasonRow {season} show={id} locked={pending != null} pending={seasonPending(season.number)}
                        failed={failed === season.number}
                        onget={() => getSeason(season.number)} onremove={() => removeSeason(season.number)} />
           {/each}

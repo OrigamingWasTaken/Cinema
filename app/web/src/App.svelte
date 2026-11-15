@@ -1,13 +1,14 @@
 <script lang="ts">
   import TabBar from "./components/TabBar.svelte";
   import { catalog } from "./lib/catalog.svelte";
-  import { onTab as isOnTab, router, TABS, type Tab } from "./lib/router.svelte";
+  import { onTab as isOnTab, playHref, router, TABS, type Tab } from "./lib/router.svelte";
   import { ui } from "./lib/ui.svelte";
   import Browse from "./screens/Browse.svelte";
   import Downloads from "./screens/Downloads.svelte";
   import Home from "./screens/Home.svelte";
   import Library from "./screens/Library.svelte";
   import Movie from "./screens/Movie.svelte";
+  import Player from "./screens/Player.svelte";
   import Search from "./screens/Search.svelte";
   import Show from "./screens/Show.svelte";
   import Shows from "./screens/Shows.svelte";
@@ -30,7 +31,8 @@
   catalog.start();
 </script>
 
-<main inert={ui.sheetOpen}>
+<!-- The player covers the film or show page it plays, which stays mounted under it. -->
+<main inert={ui.sheetOpen || router.route.play != null}>
   {#each TABS as tab (tab)}
     {#if visited[tab]}
       {@const Screen = SCREENS[tab]}
@@ -59,7 +61,13 @@
   {/if}
 </main>
 
-<TabBar />
+{#if router.route.play}
+  {#key playHref(router.route.play)}
+    <Player target={router.route.play} />
+  {/key}
+{:else}
+  <TabBar />
+{/if}
 
 <style>
   main {

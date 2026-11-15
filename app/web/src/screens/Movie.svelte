@@ -10,7 +10,7 @@
   import { clearMessage, flow, forgetReleases, getRecommended } from "../lib/flows.svelte";
   import { runtimeText, t } from "../lib/i18n";
   import { ms } from "../lib/motion";
-  import { browseHref, goBack, navigate, router, tabHref } from "../lib/router.svelte";
+  import { browseHref, goBack, navigate, playHref, router, tabHref } from "../lib/router.svelte";
   import MoreSheet from "./MoreSheet.svelte";
 
   // The film page, pushed over the current tab. What is on the server comes from the
@@ -141,6 +141,11 @@
       {/if}
 
       <div class="actions" aria-live="polite">
+        {#if item?.state === "done"}
+          <a class="btn btn--primary btn--block btn--big play" href={playHref({ kind: "movie", id })}>
+            <Icon name="play" size={22} stroke={1.6} />{t("play")}
+          </a>
+        {/if}
         {#if item}
           <div class="status-card status-card--{item.state}">
             <Status {item} />
@@ -268,6 +273,7 @@
 
   .actions { display: flex; flex-direction: column; gap: 10px; margin-top: 22px; }
   .btn--big { min-height: 56px; font-size: 18px; }
+  .play :global(path) { fill: currentColor; }
   .status-card {
     padding: 16px;
     border-radius: var(--r-card);
