@@ -94,11 +94,15 @@ def test_config_sonarr_defaults_and_lazy_key(tmp_path):
     s = load_settings({"TMDB_TOKEN": "t", "SONARR_CONFIG_XML": str(tmp_path / "s" / "c.xml")})
     assert s.sonarr_url == "http://sonarr:8989"
     assert s.shows_dir == Path("/data/shows") and s.sonarr_api_key == ""
+    assert s.downloads_dir == Path("/data/downloads")
+    assert load_settings({"TMDB_TOKEN": "t", "DOWNLOADS_DIR": "/dl"}).downloads_dir == \
+        Path("/dl")
     assert load_settings({"TMDB_TOKEN": "t"}).sonarr_config_xml == \
         Path("/sonarr-config/config.xml")
     assert load_settings({"TMDB_TOKEN": "t", "SONARR_URL": "http://x:1", "SHOWS_DIR": "/s",
                           "SONARR_API_KEY": "env"}).sonarr_api_key == "env"
     app = create_app(s, store=Store(tmp_path / "x.db"), start_poller=False)
+    assert app.state.tracker.downloads_dir == Path("/data/downloads")
     with pytest.raises(SonarrError):
         app.state.sonarr._api_key()
     (tmp_path / "s").mkdir()

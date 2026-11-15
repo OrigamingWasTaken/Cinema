@@ -25,6 +25,8 @@ class Settings:
     # Same: Sonarr writes its key on first start.
     sonarr_config_xml: Path | None = None
     shows_dir: Path = Path("/data/shows")
+    # Where rqbit puts Sonarr's torrents (rqbit's default folder; films never use it).
+    downloads_dir: Path = Path("/data/downloads")
 
 
 def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
@@ -53,6 +55,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         sonarr_api_key=sonarr_key,
         sonarr_config_xml=sonarr_xml,
         shows_dir=Path(get("SHOWS_DIR", "/data/shows")),
+        downloads_dir=Path(get("DOWNLOADS_DIR", "/data/downloads")),
         dav_user=env.get("DAV_USER") or None,
         dav_password=env.get("DAV_PASSWORD") or None,
     )

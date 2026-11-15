@@ -60,11 +60,12 @@ class FakeRqbit:
 
     def add_torrent(self, info_hash: str, files: list[tuple[list[str], int]], *,
                     file_progress: list[int] | None = None, finished: bool = False,
-                    live_peers: int = 1, name: str = "Show") -> int:
+                    live_peers: int = 1, name: str = "Show",
+                    output_folder: str = "/data/downloads") -> int:
         tid = self._next_id
         self._next_id += 1
         self.torrents[tid] = {"id": tid, "info_hash": info_hash, "name": name,
-                              "output_folder": "/downloads", "only_files": None,
+                              "output_folder": output_folder, "only_files": None,
                               "paused": False, "deleted": False, "body": b"",
                               "files": files,
                               "file_progress": file_progress or [0] * len(files),

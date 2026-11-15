@@ -550,3 +550,58 @@ async def test_torrent_vanishing_before_stats_is_skipped(env):
     assert env.tracker.ok
     assert [e.episode for e in env.tracker.listed()] == [2]
     assert HASH not in {r.info_hash for r in env.store.show_downloads()}
+
+
+@pytest.mark.anyio
+async def test_finished_downloads_paused_from_rqbit_alone(env):
+    # Grabbed and imported while cinema was down: no store row, no queue item.
+    show = env.rqbit.add_torrent("01" * 20, [(["S01E01.mkv"], 500 * MIB)],
+                                 file_progress=[500 * MIB], finished=True)
+    nested = env.rqbit.add_torrent("02" * 20, [(["S01E02.mkv"], 500 * MIB)],
+                                   file_progress=[500 * MIB], finished=True,
+                                   output_folder="/data/downloads/Show.S01/")
+    film = env.rqbit.add_torrent("03" * 20, [(["Sintel.mkv"], 500 * MIB)],
+                                 file_progress=[500 * MIB], finished=True,
+                                 output_folder="/data/movies/Sintel (2010)")
+    sibling = env.rqbit.add_torrent("04" * 20, [(["x.mkv"], 500 * MIB)],
+                                    file_progress=[500 * MIB], finished=True,
+                                    output_folder="/data/downloads-old")
+    running = env.rqbit.add_torrent("05" * 20, [(["S01E03.mkv"], 500 * MIB)],
+                                    file_progress=[100 * MIB])
+    await env.tracker.refresh()
+    assert env.tracker.ok
+    paused = {tid for tid, t in env.rqbit.torrents.items() if t["paused"]}
+    assert paused == {show, nested}
+    assert film not in paused and sibling not in paused and running not in paused
+
+
+@pytest.mark.anyio
+async def test_finished_downloads_paused_while_sonarr_is_down(env):
+    tid = env.rqbit.add_torrent(HASH, [(["S01E01.mkv"], 500 * MIB)],
+                                file_progress=[500 * MIB], finished=True)
+    env.sonarr.fail_status = 503
+    await env.tracker.refresh()
+    assert not env.tracker.ok
+    assert env.rqbit.torrents[tid]["paused"]
+
+
+@pytest.mark.anyio
+async def test_pausing_finished_downloads_is_isolated_per_torrent(env):
+    broken_stats = env.rqbit.add_torrent("01" * 20, [(["a.mkv"], 500 * MIB)],
+                                         file_progress=[500 * MIB], finished=True)
+    broken_pause = env.rqbit.add_torrent("02" * 20, [(["b.mkv"], 500 * MIB)],
+                                         file_progress=[500 * MIB], finished=True)
+    ok = env.rqbit.add_torrent("03" * 20, [(["c.mkv"], 500 * MIB)],
+                               file_progress=[500 * MIB], finished=True)
+    env.sonarr.fail_status = 503
+
+    async def handler(request):
+        path = request.url.path
+        if path in (f"/torrents/{broken_stats}/stats/v1", f"/torrents/{broken_pause}/pause"):
+            return httpx.Response(500, text="boom")
+        return await env.rqbit.transport.handler(request)
+    use_rqbit(env, httpx.MockTransport(handler))
+    await env.tracker.refresh()
+    assert env.rqbit.torrents[ok]["paused"]
+    assert not env.rqbit.torrents[broken_stats]["paused"]
+    assert not env.rqbit.torrents[broken_pause]["paused"]

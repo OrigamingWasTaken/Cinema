@@ -145,10 +145,12 @@ def _episode_keys(e: EpisodeEntry) -> set[tuple[int, int, int]]:
 
 class ShowsTracker:
     def __init__(self, store: Store, sonarr: SonarrClient, rqbit: RqbitClient,
-                 now: Callable[[], float] = time.time, watch_started: float | None = None):
+                 now: Callable[[], float] = time.time, watch_started: float | None = None,
+                 downloads_dir: str = "/data/downloads"):
         self.store = store
         self.sonarr = sonarr
         self.rqbit = rqbit
+        self.downloads_dir = PurePosixPath(downloads_dir)
         self._now = now
         self.watch_started = watch_started
         self.entries: list[EpisodeEntry] = []
@@ -159,6 +161,9 @@ class ShowsTracker:
         self._series_data: dict[int, tuple[list[SonarrEpisode], list[SonarrEpisodeFile]]] = {}
         self._read_at: dict[int, float] = {}
         self._invalid: set[int] = set()
+        # This cycle's rqbit stats, and the torrents a pause already failed for.
+        self._stats: dict[int, TorrentStats] = {}
+        self._pause_failed: set[int] = set()
 
     def invalidate(self, series_id: int) -> None:
         self._invalid.add(series_id)
@@ -182,9 +187,12 @@ class ShowsTracker:
         self.entries, self.failed, self.ok = entries, failed, True
 
     async def _refresh(self, now: float) -> tuple[list[EpisodeEntry], list[EpisodeEntry]]:
+        listed = await self.rqbit.list_torrents()
+        self._stats, self._pause_failed = {}, set()
+        await self._pause_finished_downloads(listed)
         queue = await self.sonarr.queue()
         series = {s.id: s for s in await self.sonarr.all_series() if s.id is not None}
-        torrents = {t.info_hash.lower(): t for t in await self.rqbit.list_torrents()}
+        torrents = {t.info_hash.lower(): t for t in listed}
         rows = {r.info_hash: r for r in self.store.show_downloads()}
         groups: dict[str, list[QueueItem]] = {}
         for i in queue:
@@ -200,7 +208,7 @@ class ShowsTracker:
                 continue
             try:
                 files = await self._torrent_files(h, t)
-                stats = await self.rqbit.stats(t.id)
+                stats = await self._torrent_stats(t)
             except RqbitError as e:
                 if e.status != 404:
                     raise
@@ -222,7 +230,7 @@ class ShowsTracker:
                 del rows[h]
                 continue
             try:
-                stats = await self.rqbit.stats(t.id)
+                stats = await self._torrent_stats(t)
             except RqbitError as e:
                 if e.status != 404:
                     raise
@@ -267,6 +275,32 @@ class ShowsTracker:
         failed = self._failed(rows, groups, series, now)
         return entries, failed
 
+    def _in_downloads(self, t: TorrentSummary) -> bool:
+        folder = PurePosixPath(t.output_folder)
+        return folder.is_absolute() and (folder == self.downloads_dir
+                                         or self.downloads_dir in folder.parents)
+
+    async def _pause_finished_downloads(self, torrents: list[TorrentSummary]) -> None:
+        """Finished show torrents stop uploading, from rqbit alone: this runs before any
+        Sonarr call, so it holds while Sonarr is down and for downloads cinema never saw
+        in the queue. Films never download into the downloads dir."""
+        for t in torrents:
+            if not self._in_downloads(t):
+                continue
+            try:
+                stats = await self._torrent_stats(t)
+            except _ACTION_ERRORS as e:
+                log.warning("could not read show torrent %s, retrying next cycle: %s: %s",
+                            t.id, type(e).__name__, e)
+                continue
+            if stats.finished:
+                await self._pause_finished(t, stats)
+
+    async def _torrent_stats(self, t: TorrentSummary) -> TorrentStats:
+        if t.id not in self._stats:
+            self._stats[t.id] = await self.rqbit.stats(t.id)
+        return self._stats[t.id]
+
     async def _torrent_files(self, h: str, t: TorrentSummary) -> list[TorrentFile]:
         key = (t.id, h)
         if key not in self._files:
@@ -287,7 +321,13 @@ class ShowsTracker:
     async def _pause_finished(self, t: TorrentSummary, stats: TorrentStats) -> bool:
         if stats.state == "paused":
             return True
-        return await self._act(f"pause finished show torrent {t.id}", self.rqbit.pause(t.id))
+        if t.id in self._pause_failed:  # already failed this cycle
+            return False
+        if not await self._act(f"pause finished show torrent {t.id}", self.rqbit.pause(t.id)):
+            self._pause_failed.add(t.id)
+            return False
+        stats.state = "paused"
+        return True
 
     async def _track(self, row: ShowDownload | None, h: str, t: TorrentSummary,
                      items: list[QueueItem], stats: TorrentStats, now: float) -> ShowDownload:

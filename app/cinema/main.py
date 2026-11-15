@@ -67,7 +67,7 @@ def create_app(settings: Settings, *, store: Store | None = None,
         sonarr = SonarrClient(settings.sonarr_url, _sonarr_key(settings), owned_http)
     if store is None:
         store = Store(settings.db_path)
-    tracker = ShowsTracker(store, sonarr, rqbit)
+    tracker = ShowsTracker(store, sonarr, rqbit, downloads_dir=str(settings.downloads_dir))
     if shows is None:
         shows = ShowsService(store, sonarr, tmdb, tracker, shows_dir=str(settings.shows_dir))
 
