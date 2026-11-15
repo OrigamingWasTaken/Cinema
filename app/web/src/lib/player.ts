@@ -123,8 +123,19 @@ function mseSupports(type: string): boolean {
 }
 
 /**
- * The file as it is when the browser plays its exact codecs, else the HLS rendition
- * (video copied, audio made AAC), else nothing.
+ * Whether the HLS rendition (video copied, audio made AAC) plays here: with native HLS
+ * the browser must also take the video codec in MP4 (else HEVC ends in a black screen),
+ * and without it hls.js needs Media Source for that codec.
+ */
+export function hlsSupported(info: PlayInfo, video: Pick<HTMLVideoElement, "canPlayType">): boolean {
+  const mse = mseSupports(`video/mp4; codecs="${info.codec_string}"`);
+  if (!nativeHls(video)) return mse;
+  return video.canPlayType(`video/mp4; codecs="${info.codec_string}, mp4a.40.2"`) !== "" || mse;
+}
+
+/**
+ * The file as it is when the browser plays its exact codecs, else the HLS rendition,
+ * else nothing.
  */
 export function chooseSource(info: PlayInfo, video: Pick<HTMLVideoElement, "canPlayType">): Source {
   if (info.direct_url) {
@@ -132,6 +143,52 @@ export function chooseSource(info: PlayInfo, video: Pick<HTMLVideoElement, "canP
     const codecs = info.audio_codec == null ? info.codec_string : audio ? `${info.codec_string}, ${audio}` : null;
     if (codecs && video.canPlayType(`video/mp4; codecs="${codecs}"`) !== "") return "direct";
   }
-  if (nativeHls(video) || mseSupports(`video/mp4; codecs="${info.codec_string}"`)) return "hls";
-  return "unsupported";
+  return hlsSupported(info, video) ? "hls" : "unsupported";
+}
+
+/**
+ * What a <video> error means. MEDIA_ERR_DECODE (3) or MEDIA_ERR_SRC_NOT_SUPPORTED (4)
+ * before anything played is the codec: the can't-play line, not a retry.
+ */
+export function mediaFailure(code: number | undefined, started: boolean): "unsupported" | "error" {
+  return !started && (code === 3 || code === 4) ? "unsupported" : "error";
+}
+
+export type Preflight = "ready" | "preparing" | "busy" | "error";
+
+/** The playlist's answer: 503 {"error":"preparing"} while the server indexes a long file. */
+export function playlistOutcome(status: number, body: string): Preflight {
+  if (status >= 200 && status < 300) return "ready";
+  if (status === 429) return "busy";
+  if (status === 503) {
+    try {
+      if (JSON.parse(body)?.error === "preparing") return "preparing";
+    } catch {
+      // a proxy's own 503
+    }
+  }
+  return "error";
+}
+
+/** Retry-After in ms, kept between 1 and 30 s (3 s when missing). */
+export function retryAfterMs(header: string | null): number {
+  const s = Number(header ?? "");
+  if (header == null || header.trim() === "" || !Number.isFinite(s)) return 3000;
+  return Math.min(30, Math.max(1, s)) * 1000;
+}
+
+/** A signal that aborts after `ms` or with `signal`; clear() once the request is done. */
+export function withTimeout(signal: AbortSignal, ms: number): { signal: AbortSignal; clear: () => void } {
+  const ctl = new AbortController();
+  const stop = () => ctl.abort();
+  const timer = setTimeout(stop, ms);
+  if (signal.aborted) ctl.abort();
+  else signal.addEventListener("abort", stop, { once: true });
+  return {
+    signal: ctl.signal,
+    clear: () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", stop);
+    },
+  };
 }

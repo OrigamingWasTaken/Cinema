@@ -8,8 +8,8 @@
   import { t } from "../lib/i18n";
   import { ms } from "../lib/motion";
   import {
-    chooseSource, clearPosition, clock, deviceId, nativeHls, savedPosition, savePosition,
-    type PlayInfo, type Source,
+    chooseSource, clearPosition, clock, deviceId, hlsSupported, mediaFailure, nativeHls, playlistOutcome,
+    retryAfterMs, savedPosition, savePosition, withTimeout, type PlayInfo, type Preflight, type Source,
   } from "../lib/player";
   import { goBack, type PlayTarget } from "../lib/router.svelte";
 
@@ -21,7 +21,11 @@
 
   type Phase = "loading" | "choose" | "playing" | "busy" | "unsupported" | "error";
 
-  const INFO_TIMEOUT_MS = 180000; // the first probe of a long film takes a while
+  // The server answers every request within about 50 s; a long file's first playlist
+  // says "preparing" (and when to ask again) until its keyframe index is built.
+  const INFO_TIMEOUT_MS = 60000;
+  const PLAYLIST_TIMEOUT_MS = 60000;
+  const PREPARING_LIMIT_MS = 30 * 60000;
   const SAVE_EVERY_MS = 10000;
 
   // A player is keyed by its target, which never changes for one instance.
@@ -38,6 +42,7 @@
   })();
 
   let video: HTMLVideoElement;
+  let backButton: HTMLButtonElement;
   let info = $state<PlayInfo | null>(null);
   let phase = $state<Phase>("loading");
   let resumeAt = $state<number | null>(null);
@@ -49,14 +54,81 @@
   let seekTo = 0;
   /** Playback has really started: positions before that are not worth saving. */
   let started = false;
+  /** Where the last start() began, for the fallback from direct play to HLS. */
+  let startedAt = 0;
+  /** Direct play failed before playing and HLS took over (once per load). */
+  let fellBack = false;
+  /** A native HLS error re-asked for the playlist (once per load). */
+  let rechecked = false;
   let gone = false;
   let abort = new AbortController();
 
   const hlsUrl = (data: PlayInfo) => `${data.hls_url}?d=${encodeURIComponent(deviceId())}`;
 
+  function wait(ms: number, signal: AbortSignal) {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      signal.addEventListener("abort", () => (clearTimeout(timer), resolve()), { once: true });
+    });
+  }
+
+  /** One playlist request: what it answered, and when to ask again. */
+  async function askPlaylist(data: PlayInfo, signal: AbortSignal): Promise<{ outcome: Preflight; retryMs: number }> {
+    const timed = withTimeout(signal, PLAYLIST_TIMEOUT_MS);
+    try {
+      const resp = await fetch(hlsUrl(data), { signal: timed.signal });
+      const body = await resp.text();
+      return { outcome: playlistOutcome(resp.status, body), retryMs: retryAfterMs(resp.headers.get("Retry-After")) };
+    } catch {
+      return { outcome: "error", retryMs: 0 };
+    } finally {
+      timed.clear();
+    }
+  }
+
+  /**
+   * Ask for the playlist until the server has it ready. That starts the stream session,
+   * so the cap answers here, and it waits out a long file's keyframe index ("Getting
+   * ready…") so hls.js and native players are only handed a URL that answers. Null when
+   * the page was left meanwhile.
+   */
+  async function preflight(data: PlayInfo, signal: AbortSignal): Promise<Exclude<Preflight, "preparing"> | null> {
+    const until = Date.now() + PREPARING_LIMIT_MS;
+    for (;;) {
+      const { outcome, retryMs } = await askPlaylist(data, signal);
+      if (gone || signal.aborted) return null;
+      if (outcome !== "preparing") return outcome;
+      if (Date.now() + retryMs > until) return "error";
+      await wait(retryMs, signal);
+      if (gone || signal.aborted) return null;
+    }
+  }
+
+  /** Get the HLS rendition ready to play; false (with the phase set) when it can't be. */
+  async function prepareHls(data: PlayInfo, signal: AbortSignal): Promise<boolean> {
+    const outcome = await preflight(data, signal);
+    if (outcome == null) return false;
+    if (outcome !== "ready") {
+      phase = outcome;
+      return false;
+    }
+    if (!nativeHls(video)) {
+      HlsClass ??= (await import("hls.js/light")).default;
+      if (gone) return false;
+      if (!HlsClass.isSupported()) {
+        phase = "unsupported";
+        return false;
+      }
+    }
+    return true;
+  }
+
   async function load() {
     phase = "loading";
+    abort.abort(); // an earlier load still polling stops here
     abort = new AbortController();
+    fellBack = false;
+    rechecked = false;
     const { signal } = abort;
     try {
       const data = await api<PlayInfo>(infoPath, { timeout: INFO_TIMEOUT_MS, signal });
@@ -64,20 +136,8 @@
       info = data;
       document.title = `${data.title} · Cinema`;
       source = chooseSource(data, video);
-      if (source === "hls") {
-        // Asking for the playlist starts the stream session: the cap answers here.
-        const resp = await fetch(hlsUrl(data), { signal });
-        await resp.text();
-        if (gone) return;
-        if (resp.status === 429) return void (phase = "busy");
-        if (!resp.ok) return void (phase = "error");
-        if (!nativeHls(video)) {
-          HlsClass ??= (await import("hls.js/light")).default;
-          if (gone) return;
-          if (!HlsClass.isSupported()) source = "unsupported";
-        }
-      }
       if (source === "unsupported") return void (phase = "unsupported");
+      if (source === "hls" && !(await prepareHls(data, signal))) return;
       resumeAt = savedPosition(item, data.duration);
       if (resumeAt == null) start(0);
       else phase = "choose";
@@ -92,6 +152,7 @@
     if (!info || gone) return;
     phase = "playing";
     started = false;
+    startedAt = at;
     seekTo = 0;
     if (HlsClass && source === "hls") {
       const Ctor = HlsClass;
@@ -119,7 +180,7 @@
     });
   }
 
-  function fail(why: "busy" | "error") {
+  function fail(why: "busy" | "error" | "unsupported") {
     save();
     stop();
     phase = why;
@@ -151,10 +212,32 @@
     seekTo = 0;
   }
 
-  function mediaError() {
+  async function mediaError() {
     // Fired for direct play and native HLS; hls.js reports its own errors. A src
     // removed on purpose leaves no error behind.
-    if (!gone && phase === "playing" && !hls && video.error) fail("error");
+    if (gone || phase !== "playing" || hls || !video.error || !info) return;
+    const code = video.error.code;
+    const played = started;
+    const data = info;
+    const { signal } = abort;
+    if (source === "direct" && !started && !fellBack && hlsSupported(data, video)) {
+      // The browser said yes to the file but won't play it: try the HLS rendition once.
+      fellBack = true;
+      const at = startedAt;
+      stop();
+      source = "hls";
+      phase = "loading";
+      if (await prepareHls(data, signal)) start(at);
+      return;
+    }
+    if (source === "hls" && !rechecked) {
+      // Native HLS hides the server's answers: ask once whether another viewer took the slot.
+      rechecked = true;
+      const { outcome } = await askPlaylist(data, signal);
+      if (gone || signal.aborted || phase !== "playing") return;
+      if (outcome === "busy") return fail("busy");
+    }
+    fail(mediaFailure(code, played));
   }
 
   $effect(() => {
@@ -168,6 +251,7 @@
       if (document.hidden) save();
     };
     document.addEventListener("visibilitychange", hidden);
+    backButton.focus({ preventScroll: true });
     untrack(load);
     return () => {
       save();
@@ -188,7 +272,7 @@
 
 <div class="player" role="dialog" aria-modal="true" aria-label={info?.title ?? t("play")} in:fade={{ duration: ms(180) }}>
   <header class="top">
-    <button class="back" type="button" aria-label={t("back")} onclick={() => goBack(backHref)}>
+    <button bind:this={backButton} class="back" type="button" aria-label={t("back")} onclick={() => goBack(backHref)}>
       <Icon name="back" size={22} stroke={2.4} />
     </button>
     {#if info}
