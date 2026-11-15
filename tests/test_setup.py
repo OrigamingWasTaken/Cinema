@@ -1,5 +1,6 @@
 import contextlib
 import io
+import stat
 import os
 import subprocess
 import tempfile
@@ -381,6 +382,63 @@ class TestCompose(unittest.TestCase):
             self.assertIn("- PROWLARR_API_KEY=${PROWLARR_API_KEY:-}", f.read())
 
 
+class TestRqbitCa(unittest.TestCase):
+    def test_compose_mounts_readable_ca_and_pins_same_image(self):
+        import setup
+        path = os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")
+        with open(path) as f:
+            text = f.read()
+        self.assertIn("- ${CONFIG_PATH}/rqbit/cacerts.pem:/etc/ssl/cacerts.pem:ro", text)
+        self.assertIn("image: " + setup.RQBIT_IMAGE, text)
+
+    def test_copies_ca_out_of_image_world_readable(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d:
+            dest = os.path.join(d, "rqbit", "cacerts.pem")
+
+            def fake_run(cmd, **kw):
+                if cmd[2] == "create":
+                    return mock.Mock(returncode=0, stdout="cid\n", stderr="")
+                if cmd[2] == "cp":
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with open(cmd[4], "w") as f:
+                        f.write("CERT")
+                    os.chmod(cmd[4], 0o600)
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch("subprocess.run", side_effect=fake_run) as run, \
+                    mock.patch("os.chown") as chown:
+                setup.install_rqbit_ca(d, "1024", "100")
+            cmds = [c.args[0][2] for c in run.call_args_list]
+            self.assertEqual(cmds, ["create", "cp", "rm"])
+            self.assertEqual(run.call_args_list[0].args[0][-1], setup.RQBIT_IMAGE)
+            self.assertEqual(run.call_args_list[1].args[0][3], "cid:/etc/ssl/cacerts.pem")
+            self.assertEqual(stat.S_IMODE(os.stat(dest).st_mode), 0o644)
+            chown.assert_called_once_with(dest, 1024, 100)
+
+    def test_skips_when_a_readable_copy_exists(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d:
+            dest = os.path.join(d, "rqbit", "cacerts.pem")
+            os.makedirs(os.path.dirname(dest))
+            with open(dest, "w") as f:
+                f.write("CERT")
+            os.chmod(dest, 0o644)
+            with mock.patch("subprocess.run") as run, mock.patch("os.chown"):
+                setup.install_rqbit_ca(d, "1024", "100")
+            run.assert_not_called()
+
+    def test_failure_exits_with_message(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("subprocess.run",
+                           return_value=mock.Mock(returncode=1, stdout="", stderr="boom")), \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                self.assertRaises(SystemExit):
+            setup.install_rqbit_ca(d, "1024", "100")
+        self.assertIn("boom", out.getvalue())
+
+
 class TestTvSetup(unittest.TestCase):
     def test_data_dirs_include_downloads_and_shows(self):
         import setup
@@ -760,6 +818,7 @@ class TestMainOrder(unittest.TestCase):
                         mock.patch.object(setup, "SonarrConfigurator") as sc, \
                         mock.patch.object(setup, "verify_hardlinks",
                                           return_value="rqbit runs as '', expected PUID:PGID (1024:100)"), \
+                        mock.patch.object(setup, "install_rqbit_ca"), \
                         mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
                         mock.patch("time.sleep"), \
                         contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
@@ -790,12 +849,15 @@ class TestMainOrder(unittest.TestCase):
                         mock.patch.object(setup, "ProwlarrConfigurator"), \
                         mock.patch.object(setup, "SonarrConfigurator"), \
                         mock.patch.object(setup, "verify_hardlinks", return_value=None), \
+                        mock.patch.object(setup, "install_rqbit_ca", calls.ca), \
                         mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
                         mock.patch("time.sleep"), \
                         contextlib.redirect_stdout(io.StringIO()):
                     setup.main()
             finally:
                 os.chdir(cwd)
+        names = [name for name, _, _ in calls.mock_calls]
+        self.assertLess(names.index("ca"), names.index("launcher().start"))
         order = [(name, args) for name, args, _ in calls.mock_calls
                  if name in ("chown", "launcher().start", "launcher().wait_for_healthy")]
         data = [("chown", (os.path.join(d, sub), "1024", "100"))

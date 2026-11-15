@@ -96,6 +96,40 @@ def give_to_user(config: "EnvConfig", services: tuple) -> None:
         chown_tree(os.path.join(config.config_path, svc), config.puid, config.pgid)
 
 
+RQBIT_IMAGE = "ikatson/rqbit:9.0.1"
+RQBIT_CA_IN_IMAGE = "/etc/ssl/cacerts.pem"
+
+
+def install_rqbit_ca(config_path: str, puid: str, pgid: str) -> None:
+    """Copy rqbit's CA bundle out of its image, readable by PUID.
+
+    The image ships it root-only (0600), so rqbit running as PUID:PGID cannot
+    start ("No CA certificates were loaded"). Compose mounts this copy over it.
+    """
+    dest = os.path.join(config_path, "rqbit", "cacerts.pem")
+    if os.path.isfile(dest) and os.path.getsize(dest) > 0 \
+            and stat.S_IMODE(os.stat(dest).st_mode) & 0o044 == 0o044:
+        return
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    docker = docker_bin()
+    created = subprocess.run(["sudo", docker, "create", RQBIT_IMAGE],
+                             capture_output=True, text=True)
+    if created.returncode != 0:
+        print(f"Could not read rqbit's certificates from its image:\n{created.stderr}")
+        sys.exit(1)
+    cid = created.stdout.strip()
+    try:
+        copied = subprocess.run(["sudo", docker, "cp", f"{cid}:{RQBIT_CA_IN_IMAGE}", dest],
+                                capture_output=True, text=True)
+    finally:
+        subprocess.run(["sudo", docker, "rm", cid], capture_output=True, text=True)
+    if copied.returncode != 0:
+        print(f"Could not copy rqbit's certificates:\n{copied.stderr}")
+        sys.exit(1)
+    os.chmod(dest, 0o644)
+    os.chown(dest, int(puid), int(pgid))
+
+
 def prowlarr_running() -> bool:
     """True when a container named exactly `prowlarr` is running (the v1 one uses that name)."""
     result = subprocess.run(["sudo", docker_bin(), "ps", "-q", "-f", "name=^prowlarr$"],
@@ -605,6 +639,7 @@ def main():
     DirectorySetup(config.data_path, config.config_path).create()
     print("  Directories created.")
     give_to_user(config, ("rqbit", "sonarr"))
+    install_rqbit_ca(config.config_path, config.puid, config.pgid)
 
     if migrate_prowlarr_config(config.v1_config_path, config.config_path):
         print("  Copied the v1 Prowlarr config.")

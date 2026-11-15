@@ -38,6 +38,8 @@ services:
       - ${DATA_PATH}:/data
       - ${CONFIG_PATH}/rqbit/db:/home/rqbit/db
       - ${CONFIG_PATH}/rqbit/cache:/home/rqbit/cache
+      # The image's CA bundle is root-only (0600); setup copies a readable one here.
+      - ${CONFIG_PATH}/rqbit/cacerts.pem:/etc/ssl/cacerts.pem:ro
     ports:
       - "4240:4240"
       - "4240:4240/udp"
