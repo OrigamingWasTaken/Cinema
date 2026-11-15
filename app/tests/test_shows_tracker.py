@@ -234,7 +234,6 @@ async def test_finished_torrent_paused_then_deleted_after_import(env, tmp_path):
     # Sonarr imports it and drops it from the queue.
     env.sonarr.queue = []
     env.import_file(tmp_path / "Breaking.Bad.S01E01.mkv", [101])
-    env.tracker.invalidate(SID)
     env.clock[0] = 1030.0  # too early
     await env.tracker.refresh()
     assert not env.rqbit.torrents[tid]["deleted"]
@@ -255,6 +254,38 @@ async def test_finished_torrent_paused_then_deleted_after_import(env, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_episode_stays_listed_across_its_import(env, tmp_path):
+    env.sonarr.episodes = [ep_rec(101, 1, 1)]
+    env.sonarr.queue = [queue_rec(1, 101, 1, 1)]
+    tid = env.rqbit.add_torrent(HASH, [(["Breaking.Bad.S01E01.1080p.mkv"], 500 * MIB)],
+                                file_progress=[200 * MIB])
+    on_disk = tmp_path / "Breaking.Bad.S01E01.1080p.WEB.mkv"
+    on_disk.write_bytes(b"x")
+    seen = []
+
+    async def cycle(clock):
+        env.clock[0] = clock
+        await env.tracker.refresh()
+        assert env.tracker.ok
+        [entry] = env.tracker.listed()
+        seen.append((entry.dirname, entry.season_dir, entry.filename))
+        return entry
+
+    assert (await cycle(1000.0)).torrent_id == tid  # downloading, streamed
+    env.rqbit.torrents[tid].update(file_progress=[500 * MIB], finished=True)
+    assert (await cycle(1005.0)).torrent_id == tid  # finished, waiting for the import
+    # Sonarr drops the queue item while its import is still being written.
+    env.sonarr.queue = []
+    entry = await cycle(1010.0)
+    assert (entry.torrent_id, entry.state) == (tid, "done")
+    # The import lands well before the 60 s re-read.
+    env.import_file(on_disk, [101])
+    entry = await cycle(1015.0)
+    assert entry.path == on_disk and entry.torrent_id is None
+    assert len(set(seen)) == 1 and len(seen) == 4
+
+
+@pytest.mark.anyio
 async def test_finished_torrent_kept_while_an_episode_is_not_imported(env, tmp_path):
     env.sonarr.episodes = [ep_rec(101, 1, 1), ep_rec(102, 1, 2)]
     env.sonarr.queue = [queue_rec(1, 101, 1, 1), queue_rec(2, 102, 1, 2)]
@@ -263,7 +294,6 @@ async def test_finished_torrent_kept_while_an_episode_is_not_imported(env, tmp_p
     await env.tracker.refresh()
     env.sonarr.queue = []
     env.import_file(tmp_path / "S01E01.mkv", [101])
-    env.tracker.invalidate(SID)
     env.clock[0] = 2000.0
     await env.tracker.refresh()
     assert not env.rqbit.torrents[tid]["deleted"]
@@ -468,7 +498,6 @@ async def test_failing_torrent_delete_does_not_freeze_snapshot(env, tmp_path):
     env.sonarr.queue = []
     env.import_file(tmp_path / "Breaking.Bad.S01E01.mkv", [101])
     other = healthy_second_torrent(env, 150 * MIB)
-    env.tracker.invalidate(SID)
     transport = failing(env.rqbit, "POST", f"/torrents/{tid}/delete")
     use_rqbit(env, transport)
 

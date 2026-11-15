@@ -210,12 +210,14 @@ class ShowsTracker:
             if row.status != "failed" and s is not None:
                 streamed += self._streamed(s, row, t, files, items, stats)
 
-        # Torrents that left the queue before we saw them finish must still stop uploading.
+        # Torrents that left the queue (Sonarr drops an item once it is imported):
+        # finished ones stop uploading and stay listed until their file shows up.
+        left: list[tuple[ShowDownload, TorrentSummary, TorrentStats]] = []
         for h, row in list(rows.items()):
-            if h in groups or row.status != "downloading":
+            if h in groups or row.status not in ("downloading", "finished"):
                 continue
             t = torrents.get(h)
-            if t is None:
+            if t is None:  # already gone from rqbit: nothing left to clean up
                 self.store.delete_show_download(h)
                 del rows[h]
                 continue
@@ -225,11 +227,30 @@ class ShowsTracker:
                 if e.status != 404:
                     raise
                 continue
-            if stats.finished and await self._pause_finished(t, stats):
-                rows[h] = replace(row, torrent_id=t.id, status="finished", finished_at=now)
-                self.store.upsert_show_download(rows[h])
+            if row.status == "downloading" and stats.finished \
+                    and await self._pause_finished(t, stats):
+                row = rows[h] = replace(row, torrent_id=t.id, status="finished",
+                                        finished_at=now)
+                self.store.upsert_show_download(row)
+            if row.status == "finished":
+                left.append((row, t, stats))
 
-        await self._read_series(series, {i.series_id for i in queue}, now)
+        # Re-read every series with a download in flight, so an imported file is seen
+        # on the cycle its queue item disappears.
+        active = {i.series_id for i in queue} | \
+            {r.series_id for r in rows.values() if r.status in ("downloading", "finished")}
+        await self._read_series(series, active, now)
+        for row, t, stats in left:
+            s = series.get(row.series_id)
+            if s is None:
+                continue
+            try:
+                files = await self._torrent_files(row.info_hash, t)
+            except RqbitError as e:
+                if e.status != 404:
+                    raise
+                continue
+            streamed += self._streamed(s, row, t, files, self._row_items(row), stats)
 
         # A file on disk wins over a queue entry for the same episode.
         entries = self._on_disk(series, now)
@@ -359,6 +380,15 @@ class ShowsTracker:
                 ))
         return out
 
+    def _row_items(self, row: ShowDownload) -> list[QueueItem]:
+        """A download's episodes, from Sonarr's episodes, once its queue item is gone."""
+        data = self._series_data.get(row.series_id)
+        wanted = set(row.episode_ids)
+        return [QueueItem(id=0, download_id=row.info_hash, series_id=row.series_id,
+                          episode_id=e.id, season=e.season, episode=e.number,
+                          absolute=e.absolute, status="", tracked_state="")
+                for e in (data[0] if data else []) if e.id in wanted]
+
     def _all_imported(self, row: ShowDownload) -> bool:
         data = self._series_data.get(row.series_id)
         if data is None or not row.episode_ids:
@@ -374,9 +404,7 @@ class ShowsTracker:
             if row.status != "finished" or h in groups:
                 continue
             t = torrents.get(h)
-            if t is None:  # already gone from rqbit: nothing left to clean up
-                self.store.delete_show_download(h)
-                del rows[h]
+            if t is None:
                 continue
             if (row.finished_at is None or now - row.finished_at < DELETE_AFTER_FINISH_SECONDS
                     or self.open_streams[t.id] > 0 or self.open_streams[row.torrent_id] > 0
