@@ -8,6 +8,9 @@ Today the family watches only through Infuse on the Apple TV. They want to open 
 ## Decisions taken by the user
 - **Remote access: Tailscale (option A).** Each device installs the Tailscale app once and signs in. The NAS joins the same private network. Nothing is exposed to the public internet, and the app keeps having no login.
 - **Playback: original quality, repackaged on the fly (option A).** The video stream is never re-encoded. Only the audio is converted to a browser-friendly format, and the container is changed. There is no "Data saver" or reduced-quality mode.
+- **Tailnet access: only the Cinema app (option A).** Family devices may reach port 8888 on the `cinema` machine and nothing else: not DSM, SSH, SMB, Sonarr, Prowlarr or rqbit, and not the admin's other devices. This is enforced by a Tailscale access policy, which the admin applies once in the Tailscale admin console. Setup prints the exact policy snippet, and the README shows it.
+- **Addresses: `cinema.local` at home, the Tailscale name away (option B).** Resume positions live in browser storage, so they are per address and per home-screen app. Resuming at home something started away (or the reverse) is accepted not to carry over.
+- **Direct play first** (the user asked for less work on the NAS). When the browser can play the file exactly as it is on disk, it streams the file directly with HTTP byte ranges, with no ffmpeg at all. The NAS repackages only when it must.
 
 ## Goals
 - A **Play** button wherever a finished film or episode is shown:
@@ -34,6 +37,8 @@ Today the family watches only through Infuse on the Apple TV. They want to open 
 - Picking audio tracks or languages. Use the first/default audio track.
 - Casting to a TV from the browser, and offline downloads.
 - A login or accounts in the app.
+- Playing files from the legacy v1 folder (`/data/media/movies`). It is empty on the NAS (checked 2026-11-15), and legacy files have no TMDB id or page in the app.
+- Resume that carries over between the home address and the Tailscale address (accepted above).
 
 ## Anti-goals (a failure even if it works)
 - The Cinema app or the NAS becomes reachable from the public internet. Port forwarding, DSM QuickConnect, Funnel or a public reverse proxy must never be set up for this.
@@ -51,7 +56,7 @@ Today the family watches only through Infuse on the Apple TV. They want to open 
   - The phone app currently has no runtime dependency beyond svelte. The **one** allowed exception is `hls.js`, loaded lazily only on the player page and only when the browser lacks native HLS playback (Safari has it; Chrome/Firefox desktop may not). This is my call: without it, seeking in a repackaged stream does not work in those browsers.
 - **Inputs:**
   - Files are MKV or MP4. Video is H.264 or HEVC (8/10-bit). Audio is AC3, E-AC3/DD+, DTS, FLAC, AAC, or TrueHD.
-  - Film files come from `Store` (`file_path`) or the legacy folder. Episode files come from the tracker's on-disk entries (`EpisodeEntry.path`, state `done`).
+  - Film files come only from `Store` (`file_path`, status `done`). Episode files come from the tracker's on-disk entries (`EpisodeEntry.path`, state `done`).
   - The app must refuse any path outside those known files.
 - **Existing behaviour stays:**
   - films/shows flows, WebDAV for Infuse, `/api` shapes (only additions), en/fr copy;
@@ -84,6 +89,12 @@ Today the family watches only through Infuse on the Apple TV. They want to open 
 
 ## Design
 **Server (cinema app):**
+- **Direct play:**
+  - The info endpoint (below) reports the file's container, video codec string and audio codec.
+  - The player first asks the browser (`canPlayType` for MP4 with those exact codecs) whether it can play the file as-is.
+  - If yes, it uses `GET /api/play/{kind}/{id...}/file`, which serves the file with Range support (reuse the WebDAV `FileResponse` path), and no ffmpeg runs.
+  - Direct play applies only to MP4/M4V files. MKV always goes through repackaging, because Safari cannot play MKV and Chrome's MKV support is unreliable.
+  - Direct streams don't count towards the 2-stream cap.
 - **Probe:**
   - On first Play of a file, `ffprobe` reads duration, codecs and the **keyframe timestamps** of the video stream.
   - The result is cached on disk in `/config` (small JSON per file, keyed by path, size and mtime) so later plays start instantly.
@@ -133,13 +144,16 @@ Today the family watches only through Infuse on the Apple TV. They want to open 
 - A new `tailscale` service in compose, pinned, with host network and state volume. Its hostname is `cinema`.
 - `setup.py`:
   - creates the state dir;
+  - prints the access-policy snippet for the admin to paste once: family and shared users may reach only `cinema:8888`;
   - after the stack is up, checks `tailscale status`;
   - if not logged in, prints the login URL and waits up to a few minutes, or tells the admin to re-run setup after signing in;
   - prints the Tailscale address for phones.
 - README section "Watching away from home":
   - install Tailscale and sign in;
   - how to add family members (invite, or share the `cinema` machine);
-  - open `http://cinema:8888`, and add it to the home screen too;
+  - at home keep using `http://cinema.local`; away, open the Tailscale address (`http://cinema:8888` with MagicDNS, or the full `cinema.<tailnet>.ts.net` name for people the machine is shared with), and add it to the home screen too;
+  - resume positions don't carry over between the home and away addresses;
+  - paste the access policy so family devices reach only the app;
   - a note that playing away from home needs good upload speed at home;
   - Funnel must stay off.
 
