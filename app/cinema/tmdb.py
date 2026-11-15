@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +39,53 @@ class MovieInfo:
     backdrop_path: str | None
 
 
+@dataclass(frozen=True)
+class PersonHit:
+    id: int
+    name: str
+    profile_path: str | None
+    known_for_department: str | None
+
+
+@dataclass(frozen=True)
+class CompanyHit:
+    id: int
+    name: str
+    logo_path: str | None
+
+
+@dataclass(frozen=True)
+class CollectionHit:
+    id: int
+    name: str
+    poster_path: str | None
+    backdrop_path: str | None = None
+
+
+@dataclass(frozen=True)
+class Genre:
+    id: int
+    name: str
+
+
+@dataclass(frozen=True)
+class SearchAll:
+    films: list[MovieCard]
+    people: list[PersonHit]
+    studios: list[CompanyHit]
+    collections: list[CollectionHit]
+
+
+@dataclass(frozen=True)
+class Paged:
+    films: list[MovieCard]
+    page: int
+    total_pages: int
+
+
+MAX_PAGES = 500
+
+
 def _year(release_date) -> int | None:
     if isinstance(release_date, str) and len(release_date) >= 4 and release_date[:4].isdigit():
         return int(release_date[:4])
@@ -47,6 +95,25 @@ def _year(release_date) -> int | None:
 def _card(item: dict) -> MovieCard:
     return MovieCard(item["id"], item["title"], _year(item.get("release_date")),
                      item.get("poster_path"), item.get("backdrop_path"))
+
+
+def _person(item: dict) -> PersonHit:
+    return PersonHit(item["id"], item["name"], item.get("profile_path"),
+                     item.get("known_for_department"))
+
+
+def _company(item: dict) -> CompanyHit:
+    return CompanyHit(item["id"], item["name"], item.get("logo_path"))
+
+
+def _collection(item: dict) -> CollectionHit:
+    return CollectionHit(item["id"], item["name"], item.get("poster_path"),
+                         item.get("backdrop_path"))
+
+
+def _paged(data: dict, page: int) -> Paged:
+    return Paged([_card(item) for item in data.get("results", [])], page,
+                 min(data.get("total_pages") or 1, MAX_PAGES))
 
 
 class TmdbClient:
@@ -106,3 +173,82 @@ class TmdbClient:
                 d.get("runtime") or None, d.get("original_language") or "",
                 d.get("overview") or "", d.get("poster_path"), d.get("backdrop_path"))
         return await self._cached(("movie", tmdb_id), HOUR, fetch)
+
+    async def search_all(self, query: str) -> SearchAll:
+        async def fetch() -> SearchAll:
+            params = {"query": query, "include_adult": "false"}
+            results = await asyncio.gather(
+                self._get("/search/movie", **params),
+                self._get("/search/person", **params),
+                self._get("/search/company", **params),
+                self._get("/search/collection", **params),
+                return_exceptions=True)
+            failures = [r for r in results if isinstance(r, Exception)]
+            if len(failures) == len(results):
+                raise next((f for f in failures if isinstance(f, TmdbError)), failures[0])
+            movies, people, studios, collections = (
+                {} if isinstance(r, Exception) else r for r in results)
+            wanted = query.casefold()
+            ranked = sorted(
+                (p for p in people.get("results", [])
+                 if p.get("known_for_department") in ("Acting", "Directing")),
+                key=lambda p: p.get("popularity") or 0, reverse=True)[:12]
+            kept = [p for p in ranked
+                    if p.get("profile_path") or p["name"].casefold() == wanted]
+            company_items = studios.get("results", [])
+            company_items = ([c for c in company_items if c.get("logo_path")]
+                             + [c for c in company_items if not c.get("logo_path")])[:6]
+            return SearchAll(
+                [_card(m) for m in movies.get("results", [])],
+                [_person(p) for p in kept],
+                [_company(c) for c in company_items],
+                [_collection(c) for c in collections.get("results", [])[:6]])
+        return await self._cached(("search_all", query), SEARCH_TTL, fetch)
+
+    async def person(self, person_id: int) -> tuple[PersonHit, list[MovieCard]]:
+        async def fetch() -> tuple[PersonHit, list[MovieCard]]:
+            info = await self._get(f"/person/{person_id}")
+            credits = await self._get(f"/person/{person_id}/movie_credits")
+            items: dict[int, dict] = {}
+            for item in credits.get("cast", []):
+                items.setdefault(item["id"], item)
+            for item in credits.get("crew", []):
+                if item.get("job") == "Director":
+                    items.setdefault(item["id"], item)
+            ordered = sorted(items.values(), key=lambda i: i.get("popularity") or 0,
+                             reverse=True)
+            return _person(info), [_card(i) for i in ordered]
+        return await self._cached(("person", person_id), HOUR, fetch)
+
+    async def company(self, company_id: int, page: int = 1) -> tuple[CompanyHit, Paged]:
+        async def fetch() -> tuple[CompanyHit, Paged]:
+            info = await self._get(f"/company/{company_id}")
+            data = await self._get("/discover/movie", with_companies=company_id,
+                                   sort_by="popularity.desc", page=page)
+            return _company(info), _paged(data, page)
+        return await self._cached(("company", company_id, page), HOUR, fetch)
+
+    async def collection(self, collection_id: int) -> tuple[CollectionHit, list[MovieCard]]:
+        async def fetch() -> tuple[CollectionHit, list[MovieCard]]:
+            d = await self._get(f"/collection/{collection_id}")
+            parts = sorted(d.get("parts", []),
+                           key=lambda p: (not p.get("release_date"), p.get("release_date") or ""))
+            return _collection(d), [_card(p) for p in parts]
+        return await self._cached(("collection", collection_id), HOUR, fetch)
+
+    async def genres(self) -> list[Genre]:
+        async def fetch() -> list[Genre]:
+            d = await self._get("/genre/movie/list")
+            return [Genre(g["id"], g["name"]) for g in d.get("genres", [])]
+        return await self._cached(("genres",), HOUR, fetch)
+
+    async def genre_movies(self, genre_id: int, page: int = 1) -> tuple[Genre, Paged]:
+        async def fetch() -> tuple[Genre, Paged]:
+            genre = next((g for g in await self.genres() if g.id == genre_id), None)
+            if genre is None:
+                raise TmdbError("unknown genre", status=404)
+            data = await self._get("/discover/movie", with_genres=genre_id,
+                                   sort_by="popularity.desc", page=page,
+                                   **{"vote_count.gte": 50})
+            return genre, _paged(data, page)
+        return await self._cached(("genre_movies", genre_id, page), HOUR, fetch)
