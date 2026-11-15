@@ -61,12 +61,14 @@ class TorrentSummary:
     output_folder: str
 
 
+def is_video_file(f: TorrentFile) -> bool:
+    """A video file that is not a sample."""
+    return (PurePosixPath(f.path).suffix.lower() in VIDEO_EXTENSIONS
+            and "sample" not in f.path.lower())
+
+
 def pick_video_file(files: list[TorrentFile]) -> TorrentFile | None:
-    candidates = [
-        f for f in files
-        if PurePosixPath(f.path).suffix.lower() in VIDEO_EXTENSIONS
-        and "sample" not in f.path.lower()
-    ]
+    candidates = [f for f in files if is_video_file(f)]
     return max(candidates, key=lambda f: f.length, default=None)
 
 

@@ -107,12 +107,15 @@ async def _refresh_one(store: Store, rqbit: RqbitClient, m: Movie, now: float,
         store.upsert(updated)
 
 
-def _stalled(m: Movie, now: float, watch_started: float | None) -> bool:
+def stalled_since(last_progress_at: float, now: float, watch_started: float | None) -> bool:
     # The stall clock never starts before this poller began watching: a NAS reboot or
     # app downtime is not time without peers.
-    since = m.last_progress_at if watch_started is None else max(m.last_progress_at,
-                                                                  watch_started)
+    since = last_progress_at if watch_started is None else max(last_progress_at, watch_started)
     return now - since > STALL_SECONDS
+
+
+def _stalled(m: Movie, now: float, watch_started: float | None) -> bool:
+    return stalled_since(m.last_progress_at, now, watch_started)
 
 
 async def refresh(store: Store, rqbit: RqbitClient, now: float,

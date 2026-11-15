@@ -1,4 +1,7 @@
-from cinema.store import Movie, Store, library_name
+import json
+from dataclasses import replace
+
+from cinema.store import Movie, ShowDownload, Store, library_name
 
 
 def make_movie(tmdb_id: int = 1, added_at: float = 0.0, **kw) -> Movie:
@@ -43,3 +46,37 @@ def test_library_name_sanitizes():
     assert library_name("AC/DC: Let There Be Rock", 1980) == "AC-DC - Let There Be Rock (1980)"
     assert library_name("Amélie", 2001) == "Amélie (2001)"
     assert library_name("Untitled...", None) == "Untitled"
+
+
+def test_store_show_download_roundtrip_and_episode_ids_json(tmp_path):
+    store = Store(tmp_path / "cinema.db")
+    d = ShowDownload(info_hash="ab" * 20, torrent_id=4, series_id=5, episode_ids=[11, 12],
+                     status="downloading", progress_bytes=10, added_at=2.0,
+                     last_progress_at=3.0, finished_at=None)
+    store.upsert_show_download(d)
+    store.upsert_show_download(ShowDownload("cd" * 20, 7, 6, [], "failed", 0, 1.0, 1.0, 9.0))
+    assert store.show_downloads() == [
+        ShowDownload("cd" * 20, 7, 6, [], "failed", 0, 1.0, 1.0, 9.0), d]
+    raw = store._db.execute("SELECT episode_ids FROM show_downloads WHERE torrent_id = 4")
+    assert json.loads(raw.fetchone()[0]) == [11, 12]
+    done = replace(d, status="finished", finished_at=8.5)
+    store.upsert_show_download(done)
+    assert [x for x in store.show_downloads() if x.torrent_id == 4] == [done]
+    store.delete_show_download("ab" * 20)
+    store.delete_show_download("ab" * 20)
+    assert [x.info_hash for x in store.show_downloads()] == ["cd" * 20]
+
+
+def test_store_season_request_set_get_clear(tmp_path):
+    path = tmp_path / "cinema.db"
+    store = Store(path)
+    assert store.season_requested_at(1396, 2) is None
+    store.set_season_requested(1396, 2, 100.0)
+    store.set_season_requested(1396, 3, 50.0)
+    store.set_season_requested(1396, 2, 200.0)
+    assert store.season_requested_at(1396, 2) == 200.0
+    assert Store(path).season_requested_at(1396, 3) == 50.0  # persisted, schema reused
+    store.clear_season_requested(1396, 2)
+    store.clear_season_requested(1396, 2)
+    assert store.season_requested_at(1396, 2) is None
+    assert store.season_requested_at(1396, 3) == 50.0

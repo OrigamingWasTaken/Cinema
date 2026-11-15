@@ -34,6 +34,9 @@ class FakeRqbit:
     torrents: id -> torrent record (only real adds are registered)
     content: (id, file_idx) -> full file bytes
     available: (id, file_idx) -> bytes downloaded so far (default: all)
+
+    add_torrent() registers a torrent with its own files and scripted stats
+    (per-file progress, finished, live peers) without holding any content.
     """
 
     def __init__(self, files: list[tuple[list[str], int]] | None = None,
@@ -54,15 +57,30 @@ class FakeRqbit:
         self._next_id = 0
         self.transport = httpx.MockTransport(self._handle)
 
+    def add_torrent(self, info_hash: str, files: list[tuple[list[str], int]], *,
+                    file_progress: list[int] | None = None, finished: bool = False,
+                    live_peers: int = 1, name: str = "Show") -> int:
+        tid = self._next_id
+        self._next_id += 1
+        self.torrents[tid] = {"id": tid, "info_hash": info_hash, "name": name,
+                              "output_folder": "/downloads", "only_files": None,
+                              "paused": False, "deleted": False, "body": b"",
+                              "files": files,
+                              "file_progress": file_progress or [0] * len(files),
+                              "finished": finished, "live_peers": live_peers}
+        return tid
+
     # -- helpers ---------------------------------------------------------
-    def _details(self, only: set[int] | None = None) -> dict:
+    def _details(self, only: set[int] | None = None,
+                 files: list[tuple[list[str], int]] | None = None,
+                 info_hash: str | None = None, name: str | None = None) -> dict:
         return {
-            "info_hash": self.info_hash,
-            "name": self.name,
+            "info_hash": info_hash or self.info_hash,
+            "name": name or self.name,
             "files": [
                 {"name": c[-1], "components": c, "length": n,
                  "included": only is None or i in only}
-                for i, (c, n) in enumerate(self.files)
+                for i, (c, n) in enumerate(self.files if files is None else files)
             ],
         }
 
@@ -95,7 +113,7 @@ class FakeRqbit:
 
         if request.method == "GET" and path == "/torrents":
             return self._json(200, {"torrents": [
-                {"id": t["id"], "info_hash": t["info_hash"], "name": self.name,
+                {"id": t["id"], "info_hash": t["info_hash"], "name": t.get("name", self.name),
                  "output_folder": t["output_folder"]}
                 for t in self.torrents.values() if not t["deleted"]]})
         m = re.fullmatch(r"/torrents/(\d+)(?:/(stats/v1|pause|delete|stream/(\d+)))?", path)
@@ -106,7 +124,9 @@ class FakeRqbit:
             return httpx.Response(404, text="torrent not found")
         action = m.group(2)
         if action is None:
-            return self._json(200, self._details(self.torrents[tid]["only_files"]))
+            t = self.torrents[tid]
+            return self._json(200, self._details(t["only_files"], t.get("files"),
+                                                 t["info_hash"], t.get("name")))
         if action == "stats/v1":
             return self._json(200, self._stats(tid))
         if action == "pause":
@@ -126,6 +146,8 @@ class FakeRqbit:
 
     def _stats(self, tid: int) -> dict:
         t = self.torrents[tid]
+        if "file_progress" in t:
+            return self._scripted_stats(t)
         total = sum(len(b) for (i, _), b in self.content.items() if i == tid)
         got = sum(self.available.get(k, len(b))
                   for k, b in self.content.items() if k[0] == tid)
@@ -138,6 +160,19 @@ class FakeRqbit:
         return {"state": "paused" if t["paused"] else ("live" if live else "finished"),
                 "file_progress": self._file_progress(tid), "error": None, "progress_bytes": got,
                 "uploaded_bytes": 0, "total_bytes": total, "finished": finished,
+                "live": live}
+
+    @staticmethod
+    def _scripted_stats(t: dict) -> dict:
+        progress = list(t["file_progress"])
+        live = None
+        if not t["paused"]:
+            live = {"download_speed": {"mbps": 0.0 if t["finished"] else 2.0},
+                    "time_remaining": None if t["finished"] else {"duration": {"secs": 90}},
+                    "snapshot": {"peer_stats": {"live": t["live_peers"]}}}
+        return {"state": "paused" if t["paused"] else "live", "file_progress": progress,
+                "error": None, "progress_bytes": sum(progress), "uploaded_bytes": 0,
+                "total_bytes": sum(n for _, n in t["files"]), "finished": t["finished"],
                 "live": live}
 
     def _file_progress(self, tid: int) -> list[int]:
