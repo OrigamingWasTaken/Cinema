@@ -122,7 +122,7 @@ async def test_home_survives_tmdb_down(settings, tmp_path):
 async def test_search_and_detail(settings, tmp_path):
     client, store, _ = build(settings, tmp_path)
     r = await client.get("/api/search", params={"q": "dune"})
-    assert [c["id"] for c in r.json()["results"]] == [693134, 5]
+    assert [c["id"] for c in r.json()["films"]] == [693134, 5]
     detail = (await client.get("/api/movies/693134")).json()
     assert detail["movie"]["runtime"] == 166 and detail["library"] is None
     store.upsert(movie_row())
@@ -272,3 +272,98 @@ async def test_unknown_movie_is_404(settings, tmp_path):
     home = await client.get("/api/home")
     assert home.status_code == 200 and home.json()["catalog_error"] is True
 
+
+
+PERSON = {"id": 7, "name": "Denis V", "profile_path": "/pp.jpg",
+          "known_for_department": "Directing", "popularity": 9}
+
+
+def catalog_handler(request):
+    path = request.url.path
+    page = int(request.url.params.get("page", "1"))
+    if path == "/3/search/person":
+        return httpx.Response(200, json={"results": [PERSON]})
+    if path in ("/3/search/movie", "/3/search/company", "/3/search/collection"):
+        return httpx.Response(200, json={"results": []})
+    if path == "/3/person/7":
+        return httpx.Response(200, json=PERSON)
+    if path == "/3/person/7/movie_credits":
+        return httpx.Response(200, json={"cast": [CARD, OTHER], "crew": []})
+    if path == "/3/company/9":
+        return httpx.Response(200, json={"id": 9, "name": "Legendary", "logo_path": "/l.png"})
+    if path == "/3/collection/11":
+        return httpx.Response(200, json={"id": 11, "name": "Dune Coll", "poster_path": "/c.jpg",
+                                         "backdrop_path": "/cb.jpg", "parts": [CARD]})
+    if path == "/3/genre/movie/list":
+        return httpx.Response(200, json={"genres": [{"id": 18, "name": "Drama"}]})
+    if path == "/3/discover/movie":
+        return httpx.Response(200, json={"results": [CARD], "page": page, "total_pages": 42})
+    return httpx.Response(404, json={})
+
+
+@pytest.mark.anyio
+async def test_search_groups_person_only(settings, tmp_path):
+    client, _, _ = build(settings, tmp_path, tmdb=catalog_handler)
+    body = (await client.get("/api/search", params={"q": "denis"})).json()
+    assert body["films"] == [] and body["studios"] == [] and body["collections"] == []
+    assert body["people"] == [{"id": 7, "name": "Denis V", "profile_path": "/pp.jpg",
+                               "known_for_department": "Directing"}]
+
+
+@pytest.mark.anyio
+async def test_search_empty_query_no_tmdb_call(settings, tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"results": []})
+    client, _, _ = build(settings, tmp_path, tmdb=handler)
+    body = (await client.get("/api/search", params={"q": "  "})).json()
+    assert body == {"films": [], "people": [], "studios": [], "collections": []}
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_person_page_cards_have_in_library(settings, tmp_path):
+    client, store, _ = build(settings, tmp_path, tmdb=catalog_handler)
+    store.upsert(movie_row())
+    body = (await client.get("/api/people/7")).json()
+    assert body["person"]["name"] == "Denis V"
+    assert [(c["id"], c["in_library"]) for c in body["films"]] == [(693134, True), (5, False)]
+
+
+@pytest.mark.anyio
+async def test_studio_and_collection_pages(settings, tmp_path):
+    client, _, _ = build(settings, tmp_path, tmdb=catalog_handler)
+    studio = (await client.get("/api/studios/9")).json()
+    assert studio["studio"] == {"id": 9, "name": "Legendary", "logo_path": "/l.png"}
+    assert studio["page"] == 1 and studio["total_pages"] == 42
+    coll = (await client.get("/api/collections/11")).json()
+    assert coll["collection"] == {"id": 11, "name": "Dune Coll", "poster_path": "/c.jpg",
+                                  "backdrop_path": "/cb.jpg"}
+    assert [c["id"] for c in coll["films"]] == [693134]
+
+
+@pytest.mark.anyio
+async def test_genre_list_and_unknown_genre(settings, tmp_path):
+    client, _, _ = build(settings, tmp_path, tmdb=catalog_handler)
+    assert (await client.get("/api/genres")).json() == {"genres": [{"id": 18, "name": "Drama"}]}
+    resp = await client.get("/api/genres/999")
+    assert resp.status_code == 404 and resp.json() == {"error": "not_found"}
+
+
+@pytest.mark.anyio
+async def test_genre_page_passes_page_and_total(settings, tmp_path):
+    client, _, _ = build(settings, tmp_path, tmdb=catalog_handler)
+    body = (await client.get("/api/genres/18", params={"page": 2})).json()
+    assert body["genre"] == {"id": 18, "name": "Drama"}
+    assert body["page"] == 2 and body["total_pages"] == 42
+    assert (await client.get("/api/genres/18", params={"page": 0})).status_code == 422
+    assert (await client.get("/api/studios/9", params={"page": 501})).status_code == 422
+
+
+@pytest.mark.anyio
+async def test_unknown_person_is_404(settings, tmp_path):
+    client, _, _ = build(settings, tmp_path, tmdb=catalog_handler)
+    resp = await client.get("/api/people/404")
+    assert resp.status_code == 404 and resp.json() == {"error": "not_found"}

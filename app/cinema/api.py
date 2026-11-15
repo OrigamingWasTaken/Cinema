@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TypeVar
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Query
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
@@ -105,6 +105,15 @@ def _release_view(c: Classified) -> dict:
     }
 
 
+def _collection_ref(c) -> dict:
+    return {"id": c.id, "name": c.name, "poster_path": c.poster_path}
+
+
+def _paged(p, store: Store) -> dict:
+    return {"films": [_card(c, store) for c in p.films], "page": p.page,
+            "total_pages": p.total_pages}
+
+
 def _disk(path: Path) -> dict:
     probe = Path(path)
     while not probe.exists() and probe != probe.parent:
@@ -148,9 +157,39 @@ def build_api_router(settings: Settings, store: Store, rqbit: RqbitClient,
     async def search(q: str = ""):
         query = q.strip()
         if not query:
-            return {"results": []}
-        cards = await _call("tmdb", (TmdbError,), tmdb.search(query))
-        return {"results": [_card(c, store) for c in cards]}
+            return {"films": [], "people": [], "studios": [], "collections": []}
+        found = await _call("tmdb", (TmdbError,), tmdb.search_all(query))
+        return {
+            "films": [_card(c, store) for c in found.films],
+            "people": [asdict(p) for p in found.people],
+            "studios": [asdict(s) for s in found.studios],
+            "collections": [_collection_ref(c) for c in found.collections],
+        }
+
+    @router.get("/people/{person_id}")
+    async def person_page(person_id: int):
+        person, films = await _call("tmdb", (TmdbError,), tmdb.person(person_id))
+        return {"person": asdict(person), "films": [_card(c, store) for c in films]}
+
+    @router.get("/studios/{studio_id}")
+    async def studio_page(studio_id: int, page: int = Query(1, ge=1, le=500)):
+        studio, paged = await _call("tmdb", (TmdbError,), tmdb.company(studio_id, page))
+        return {"studio": asdict(studio), **_paged(paged, store)}
+
+    @router.get("/collections/{collection_id}")
+    async def collection_page(collection_id: int):
+        coll, films = await _call("tmdb", (TmdbError,), tmdb.collection(collection_id))
+        return {"collection": asdict(coll), "films": [_card(c, store) for c in films]}
+
+    @router.get("/genres")
+    async def genre_list():
+        genres = await _call("tmdb", (TmdbError,), tmdb.genres())
+        return {"genres": [asdict(g) for g in genres]}
+
+    @router.get("/genres/{genre_id}")
+    async def genre_page(genre_id: int, page: int = Query(1, ge=1, le=500)):
+        genre, paged = await _call("tmdb", (TmdbError,), tmdb.genre_movies(genre_id, page))
+        return {"genre": asdict(genre), **_paged(paged, store)}
 
     @router.get("/movies/{tmdb_id}")
     async def movie_detail(tmdb_id: int):

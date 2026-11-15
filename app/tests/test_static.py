@@ -41,7 +41,7 @@ async def test_root_serves_phone_app(client):
 async def test_static_mount_does_not_shadow_other_routes(client):
     assert (await client.get("/healthz")).json() == {"ok": True}
     assert (await client.get("/api/movies/abc")).status_code == 422
-    assert (await client.get("/api/search")).json() == {"results": []}
+    assert (await client.get("/api/search")).json() == {"films": [], "people": [], "studios": [], "collections": []}
     # /dav answers with WebDAV, not the phone app's index.html.
     dav = await client.request("PROPFIND", "/dav/", headers={"Depth": "0"})
     assert dav.status_code == 207 and "text/html" not in dav.headers.get("content-type", "")
@@ -56,4 +56,4 @@ async def test_unknown_static_path_is_404(client):
 async def test_app_starts_without_a_built_phone_app(settings, tmp_path):
     client = make_client(settings, tmp_path / "missing")
     assert (await client.get("/healthz")).json() == {"ok": True}
-    assert (await client.get("/api/search")).json() == {"results": []}
+    assert (await client.get("/api/search")).json() == {"films": [], "people": [], "studios": [], "collections": []}
