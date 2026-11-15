@@ -104,6 +104,20 @@ services:
     network_mode: host
     restart: unless-stopped
 
+  tailscale:
+    image: tailscale/tailscale:v1.104.7
+    container_name: tailscale
+    environment:
+      - TS_HOSTNAME=cinema
+      - TS_USERSPACE=true
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_ACCEPT_DNS=false
+    volumes:
+      - ${CONFIG_PATH}/tailscale:/var/lib/tailscale
+    network_mode: host
+    restart: unless-stopped
+
 networks:
   cinema:
     driver: bridge

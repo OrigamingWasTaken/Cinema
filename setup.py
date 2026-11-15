@@ -43,7 +43,7 @@ class EnvConfig:
 
 
 DATA_DIRS = ["movies", "downloads", "shows"]
-CONFIG_SERVICES = ["prowlarr", "rqbit/db", "rqbit/cache", "cinema", "sonarr"]
+CONFIG_SERVICES = ["prowlarr", "rqbit/db", "rqbit/cache", "cinema", "sonarr", "tailscale"]
 
 DEFAULT_INDEXERS = ["The Pirate Bay", "YTS", "Knaben"]
 # EZTV and 1337x are not used: EZTV is unreliable and 1337x needs a Cloudflare solve.
@@ -599,6 +599,93 @@ def infuse_login_lines(dav_user: Optional[str], dav_password: Optional[str]) -> 
         lines.append(f"       ({warning})")
     return lines
 
+TAILSCALE_WAIT_STEPS = 40  # x 3 s = 120 s
+TAILSCALE_PORT = 8888
+
+# A grants example; tcp:8888 is the only port the family and shared users get.
+ACCESS_POLICY_SNIPPET = """\
+// Paste this in the Tailscale admin console -> Access controls.
+// It REPLACES the default allow-all policy, so keep the first grant for your own devices.
+{
+  "tagOwners": {"tag:cinema": ["autogroup:admin"]},
+  "groups": {"group:family": ["mom@example.com", "dad@example.com"]},
+  "grants": [
+    {"src": ["autogroup:admin"], "dst": ["*"], "ip": ["*"]},
+    {"src": ["group:family", "autogroup:shared"], "dst": ["tag:cinema"], "ip": ["tcp:8888"]}
+  ]
+}"""
+
+
+def tailscale_status() -> Optional[dict]:
+    """Parsed `tailscale status --json` from the tailscale container; None on any failure."""
+    try:
+        result = subprocess.run(
+            ["sudo", docker_bin(), "exec", "tailscale", "tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return None
+        status = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return status if isinstance(status, dict) else None
+
+
+def tailscale_login_url(status: Optional[dict]) -> Optional[str]:
+    if status and status.get("BackendState") == "NeedsLogin":
+        return status.get("AuthURL") or None
+    return None
+
+
+def tailscale_address(status: Optional[dict]) -> Optional[str]:
+    """The machine's Tailscale name (no trailing dot), else its first Tailscale IP."""
+    if not status:
+        return None
+    dns = ((status.get("Self") or {}).get("DNSName") or "").rstrip(".")
+    if dns:
+        return dns
+    ips = status.get("TailscaleIPs") or []
+    return ips[0] if ips else None
+
+
+def wait_for_tailscale() -> Optional[dict]:
+    """Poll for up to 120 s until Tailscale runs, printing the login link once.
+
+    Returns the last status seen (None when the container never answered).
+    """
+    status = None
+    shown = False
+    for step in range(TAILSCALE_WAIT_STEPS):
+        status = tailscale_status()
+        url = tailscale_login_url(status)
+        if url and not shown:
+            print("  Tailscale needs a login. Open this link and sign in:")
+            print(f"    {url}")
+            shown = True
+        if status and status.get("BackendState") == "Running":
+            return status
+        if step < TAILSCALE_WAIT_STEPS - 1:
+            time.sleep(3)
+    return status
+
+
+def check_tailscale() -> Optional[dict]:
+    """Phase 7: never fails setup; warns when Tailscale is not usable yet."""
+    try:
+        status = wait_for_tailscale()
+    except Exception as e:
+        print(f"  WARNING: could not check Tailscale: {e}")
+        return None
+    if status is None:
+        print("  WARNING: could not read Tailscale's status (is the tailscale container up?).")
+    elif status.get("BackendState") == "NeedsLogin":
+        print("  Tailscale is still waiting for a login. Open the link above, sign in,")
+        print("  then re-run: sudo python3 setup.py")
+    elif status.get("BackendState") != "Running":
+        print(f"  WARNING: Tailscale is {status.get('BackendState')}, not Running yet.")
+    else:
+        print("  Tailscale is running.")
+    return status
+
 
 def detect_ip() -> str:
     try:
@@ -672,6 +759,9 @@ def main():
     if hardlink_problem is None:
         print("  Hardlinks work.")
 
+    print("\n[Phase 7] Checking Tailscale...")
+    tailscale = check_tailscale()
+
     ip = detect_ip()
     print("\n" + "=" * 50)
     print("Setup complete!")
@@ -687,6 +777,12 @@ def main():
         print(line)
     print("  3. Settings -> Subtitles: auto-download, English.")
     print("  Infuse: Shows appear in the same share")
+    away = tailscale_address(tailscale) if tailscale_login_url(tailscale) is None else None
+    if away:
+        print("\nPhones away from home (Tailscale app signed in):")
+        print(f"  http://{away}:{TAILSCALE_PORT}")
+    print("\nTailscale access policy (family gets only the cinema app):")
+    print(ACCESS_POLICY_SNIPPET)
     if hardlink_problem is not None:
         print()
         print(f"ERROR: hardlinks from downloads/ to shows/ do not work: {hardlink_problem}")

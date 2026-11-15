@@ -18,6 +18,7 @@ phone web app (cinema :8888)  ->  rqbit downloads  ->  Infuse plays over WebDAV
 | Prowlarr | 9696 | Indexer manager (search) |
 | Sonarr | 8989 | Show manager (seasons, imports); admin only |
 | FlareSolverr | internal | Cloudflare helper for Prowlarr |
+| tailscale | host network | Private access to the web app away from home |
 
 ## Prerequisites
 
@@ -128,6 +129,43 @@ It needs:
 4. Within about 2 minutes it shows up in Infuse under Cinema -> Movies. You can
    press play while it is still downloading. **Downloads** shows the progress;
    **Library** lists the films that are on the TV.
+
+## Watching in the browser
+
+- Finished films and episodes have a **Play** button in the phone app.
+- Some files play directly. The rest are converted on the fly (video is never
+  re-encoded, only the audio).
+- HEVC files need Safari or a recent Chrome.
+- Two people can watch in a browser at once. A third is told the NAS is busy.
+- There are no subtitles in the browser. Use Infuse for those.
+
+## Watching away from home
+
+The `tailscale` service puts the NAS on a private Tailscale network under the
+name `cinema`. Nothing is opened to the internet.
+
+1. Install Tailscale on each device (phone, laptop) and sign in.
+2. After `sudo python3 setup.py`, open the login link it prints once. If you
+   set `TS_AUTHKEY` in `.env` (optional), no link is needed.
+3. To let family in, either invite them to your tailnet or share the `cinema`
+   machine with them from the Tailscale admin console (Machines -> cinema ->
+   Share).
+4. Limit them to the web app. Tag the machine `tag:cinema`, then paste the
+   access policy that setup prints into the admin console (Access controls).
+   It replaces the default allow-all policy: family and shared users get only
+   port 8888, and the first grant keeps your own full access. Put your family's
+   emails in `group:family`.
+5. Away from home, open `http://<name>.ts.net:8888` (setup prints the exact
+   name).
+
+At home, use `cinema.local`. Away, use the Tailscale name. They count as
+different addresses, so where you stopped watching does not carry over between
+them.
+
+Upload speed matters: the stream leaves your home through your internet
+upload. Streams over about 5 Mb/s need a good connection.
+
+Never turn on Tailscale Funnel, and never port-forward on the router.
 
 ## Infuse setup (Apple TV)
 

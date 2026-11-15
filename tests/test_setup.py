@@ -349,7 +349,7 @@ class TestHelpers(unittest.TestCase):
         import setup
         self.assertEqual(setup.DATA_DIRS, ["movies", "downloads", "shows"])
         self.assertEqual(setup.CONFIG_SERVICES,
-                         ["prowlarr", "rqbit/db", "rqbit/cache", "cinema", "sonarr"])
+                         ["prowlarr", "rqbit/db", "rqbit/cache", "cinema", "sonarr", "tailscale"])
         self.assertEqual(setup.StackLauncher.HEALTH_PORTS, {"prowlarr": 9696, "cinema": 8888})
 
     def test_docker_bin_falls_back(self):
@@ -820,6 +820,7 @@ class TestMainOrder(unittest.TestCase):
                                           return_value="rqbit runs as '', expected PUID:PGID (1024:100)"), \
                         mock.patch.object(setup, "install_rqbit_ca"), \
                         mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
+                        mock.patch.object(setup, "tailscale_status", return_value=None), \
                         mock.patch("time.sleep"), \
                         contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
                     setup.main()
@@ -851,6 +852,7 @@ class TestMainOrder(unittest.TestCase):
                         mock.patch.object(setup, "verify_hardlinks", return_value=None), \
                         mock.patch.object(setup, "install_rqbit_ca", calls.ca), \
                         mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
+                        mock.patch.object(setup, "tailscale_status", return_value=None), \
                         mock.patch("time.sleep"), \
                         contextlib.redirect_stdout(io.StringIO()):
                     setup.main()
@@ -868,6 +870,129 @@ class TestMainOrder(unittest.TestCase):
         self.assertEqual(order[:start], data + [rqbit, sonarr])
         self.assertEqual(order[start + 1:start + 5], data + [rqbit])
         self.assertEqual(order[start + 5][0], "launcher().wait_for_healthy")
+
+
+NEEDS_LOGIN = {"BackendState": "NeedsLogin", "AuthURL": "https://login.tailscale.com/a/abc123",
+               "Self": None, "TailscaleIPs": None}
+RUNNING = {"BackendState": "Running", "AuthURL": "",
+           "Self": {"DNSName": "cinema.tail1234.ts.net."},
+           "TailscaleIPs": ["100.64.0.7", "fd7a::7"]}
+
+
+def run_main(extra_env=None, status=None, status_side_effect=None):
+    """Run setup.main() with everything mocked; returns (stdout, sleep mock)."""
+    import setup
+    out = io.StringIO()
+    with tempfile.TemporaryDirectory() as d:
+        write_env(os.path.join(d, ".env"),
+                  dict({"DATA_PATH": d, "CONFIG_PATH": os.path.join(d, "c")}, **(extra_env or {})))
+        cwd = os.getcwd()
+        os.chdir(d)
+        try:
+            with mock.patch.object(setup, "chown_tree"), \
+                    mock.patch.object(setup, "migrate_prowlarr_config", return_value=False), \
+                    mock.patch.object(setup, "StackLauncher"), \
+                    mock.patch.object(setup, "ProwlarrConfigurator"), \
+                    mock.patch.object(setup, "SonarrConfigurator"), \
+                    mock.patch.object(setup, "verify_hardlinks", return_value=None), \
+                    mock.patch.object(setup, "install_rqbit_ca"), \
+                    mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
+                    mock.patch.object(setup, "tailscale_status", return_value=status,
+                                      side_effect=status_side_effect), \
+                    mock.patch("time.sleep") as sleep, \
+                    contextlib.redirect_stdout(out):
+                setup.main()
+        finally:
+            os.chdir(cwd)
+    return out.getvalue(), sleep
+
+
+class TestTailscale(unittest.TestCase):
+    def test_compose_tailscale_pinned_userspace(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")
+        with open(path) as f:
+            text = f.read()
+        block = text[text.index("\n  tailscale:\n"):]
+        block = block[:block.index("\nnetworks:")] if "\nnetworks:" in block else block
+        for line in ("image: tailscale/tailscale:v1.104.7", "container_name: tailscale",
+                     "network_mode: host", "- TS_HOSTNAME=cinema", "- TS_USERSPACE=true",
+                     "- TS_STATE_DIR=/var/lib/tailscale", "- TS_AUTHKEY=${TS_AUTHKEY:-}",
+                     "- TS_ACCEPT_DNS=false", "- ${CONFIG_PATH}/tailscale:/var/lib/tailscale",
+                     "restart: unless-stopped"):
+            self.assertIn(line, block)
+        self.assertNotIn("TS_SERVE", block)
+        self.assertNotIn("funnel", block.lower())
+        import setup
+        self.assertIn("tailscale", setup.CONFIG_SERVICES)
+
+    def test_tailscale_login_url_and_address(self):
+        import setup
+        self.assertEqual(setup.tailscale_login_url(NEEDS_LOGIN),
+                         "https://login.tailscale.com/a/abc123")
+        self.assertIsNone(setup.tailscale_login_url(RUNNING))
+        self.assertIsNone(setup.tailscale_login_url(None))
+        self.assertEqual(setup.tailscale_address(RUNNING), "cinema.tail1234.ts.net")
+        self.assertIsNone(setup.tailscale_address(NEEDS_LOGIN))
+        ip_only = {"BackendState": "Running", "Self": {"DNSName": ""},
+                   "TailscaleIPs": ["100.64.0.7"]}
+        self.assertEqual(setup.tailscale_address(ip_only), "100.64.0.7")
+        self.assertIsNone(setup.tailscale_address(None))
+
+    def test_tailscale_status_parses_and_fails_to_none(self):
+        import setup
+        ok = subprocess.CompletedProcess([], 0, stdout='{"BackendState": "Running"}', stderr="")
+        with mock.patch("subprocess.run", return_value=ok) as run:
+            self.assertEqual(setup.tailscale_status(), {"BackendState": "Running"})
+        self.assertEqual(run.call_args[0][0][0], "sudo")
+        self.assertEqual(run.call_args[0][0][2:],
+                         ["exec", "tailscale", "tailscale", "status", "--json"])
+        bad = subprocess.CompletedProcess([], 1, stdout="", stderr="no such container")
+        with mock.patch("subprocess.run", return_value=bad):
+            self.assertIsNone(setup.tailscale_status())
+        junk = subprocess.CompletedProcess([], 0, stdout="not json", stderr="")
+        with mock.patch("subprocess.run", return_value=junk):
+            self.assertIsNone(setup.tailscale_status())
+        with mock.patch("subprocess.run", side_effect=OSError("no sudo")):
+            self.assertIsNone(setup.tailscale_status())
+
+    def test_tailscale_failure_warns_not_fails(self):
+        out, _ = run_main(status=None)
+        self.assertIn("WARNING", out)
+        self.assertIn("Tailscale", out)
+        self.assertIn("Setup complete!", out)
+        out, _ = run_main(status_side_effect=ValueError("boom"))
+        self.assertIn("WARNING", out)
+        self.assertIn("Setup complete!", out)
+
+    def test_login_url_printed_once_and_rerun_hint_when_still_waiting(self):
+        out, sleep = run_main(status=NEEDS_LOGIN)
+        self.assertEqual(out.count(NEEDS_LOGIN["AuthURL"]), 1)
+        self.assertIn("re-run", out)
+        self.assertLessEqual(sleep.call_count * 3, 120 + 3 + 10 + 3)  # bounded wait
+        self.assertIn("Setup complete!", out)
+
+    def test_running_prints_address_and_policy(self):
+        out, _ = run_main(status=RUNNING)
+        self.assertIn("cinema.tail1234.ts.net", out)
+        self.assertIn("tag:cinema", out)
+        self.assertNotIn("re-run", out)
+
+    def test_access_policy_mentions_only_8888(self):
+        import re
+        import setup
+        snippet = setup.ACCESS_POLICY_SNIPPET
+        self.assertIn('"grants"', snippet)
+        self.assertIn("group:family", snippet)
+        self.assertIn("autogroup:shared", snippet)
+        self.assertIn("tag:cinema", snippet)
+        self.assertIn("tagOwners", snippet)
+        self.assertEqual(re.findall(r"(?:tcp|udp):[\w*-]+", snippet), ["tcp:8888"])
+        self.assertIn("allow-all", snippet)
+
+    def test_authkey_never_printed(self):
+        out, _ = run_main(extra_env={"TS_AUTHKEY": "tskey-auth-SECRET123"}, status=NEEDS_LOGIN)
+        self.assertNotIn("tskey-auth-SECRET123", out)
+        self.assertNotIn("tskey", out)
 
 
 if __name__ == "__main__":
