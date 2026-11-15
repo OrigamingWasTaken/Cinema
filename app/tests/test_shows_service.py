@@ -170,27 +170,41 @@ async def test_page_tmdb_error_propagates(env):
         await env.page(999)
 
 
+def pending(fake, *episodes):
+    fake.pending_episodes[TVDB] = [
+        {"seasonNumber": n, "episodeNumber": i, "airDateUtc": PAST if aired else FUTURE}
+        for n, i, aired in episodes]
+
+
+def monitored(fake):
+    return sorted((e["seasonNumber"], e["episodeNumber"]) for e in fake.episodes if e["monitored"])
+
+
 @pytest.mark.anyio
 async def test_get_season_adds_series_with_fr_profile_and_anime_type(env):
     env.tmdb_fake.shows[TMDB] = info(lang="fr", anime=True)
     env.fake.profiles = [{"id": 1, "name": "Cinema"}, {"id": 2, "name": "Cinema FR"}]
     env.fake.lookup[TVDB] = lookup_result()
-    env.fake.episodes = [ep_dict(101, 1, series_id=101), ep_dict(102, 2, series_id=101)]
-    await env.get_season(TMDB, 1)
-    assert writes(env.fake) == [
-        ("POST", "/api/v3/series"), ("PUT", "/api/v3/series/101"),
-        ("PUT", "/api/v3/episode/monitor"), ("POST", "/api/v3/command"),
-    ]
+    pending(env.fake, (1, 1, True), (1, 2, True), (2, 1, True))
+    page = await env.get_season(TMDB, 1)
+    # one add carrying the intent; no immediate monitor/search against a series with no episodes
+    assert writes(env.fake) == [("POST", "/api/v3/series")]
     added = env.fake.calls[0][2]
     assert added["qualityProfileId"] == 2 and added["seriesType"] == "anime"
     assert added["rootFolderPath"] == "/shows"
-    put = env.fake.calls[1][2]
-    assert {s["seasonNumber"]: s["monitored"] for s in put["seasons"]} == {0: False, 1: True, 2: False}
-    assert env.fake.calls[2][2] == {"episodeIds": [101], "monitored": True}
-    assert env.fake.calls[3][2]["name"] == "SeasonSearch"
-    assert env.fake.calls[3][2]["seasonNumber"] == 1
+    assert {s["seasonNumber"]: s["monitored"] for s in added["seasons"]} == \
+        {0: False, 1: True, 2: False}
+    assert added["addOptions"]["monitor"] == "skip"
+    assert added["addOptions"]["searchForMissingEpisodes"] is True
     assert env.store.season_requested_at(TMDB, 1) == NOW
     assert env.tracker_fake.invalidated == [101]
+    assert page["seasons"][0]["episodes"] == []  # Sonarr has not refreshed yet
+    # Sonarr's refresh creates the episodes and applies the options
+    env.fake.refresh(101, NOW)
+    assert monitored(env.fake) == [(1, 1), (1, 2)]
+    assert env.fake.calls[-1][2] == {"name": "MissingEpisodeSearch", "seriesId": 101}
+    page = await env.page(TMDB)
+    assert page["seasons"][0]["state"] == "looking"
 
 
 @pytest.mark.anyio
@@ -229,12 +243,57 @@ async def test_follow_airing_also_gets_current_season(env):
 
 
 @pytest.mark.anyio
-async def test_follow_adds_missing_series_first(env):
+async def test_follow_new_series_waits_for_refresh_then_gets_airing_season(env):
     env.tmdb_fake.shows[TMDB] = info(airing=True)
     env.fake.lookup[TVDB] = lookup_result()
+    pending(env.fake, (1, 1, True), (1, 2, True), (2, 1, True), (2, 2, True), (2, 3, False))
+    refreshed = []
+
+    async def sleep(_):
+        env.fake.refresh(101, NOW)
+        refreshed.append(1)
+    env._sleep = sleep
+    page = await env.follow(TMDB)
+    assert refreshed == [1]
+    added = env.fake.calls[0][2]
+    assert added["monitorNewItems"] == "all" and added["addOptions"]["monitor"] == "future"
+    assert added["addOptions"]["searchForMissingEpisodes"] is False
+    # season 2 is airing: its aired episodes and the future one end up monitored, season 1 not
+    assert monitored(env.fake) == [(2, 1), (2, 2), (2, 3)]
+    assert env.fake.calls[-1][2]["name"] == "SeasonSearch"
+    assert env.fake.calls[-1][2]["seasonNumber"] == 2
+    assert page["following"] is True
+
+
+@pytest.mark.anyio
+async def test_follow_new_series_between_seasons_monitors_only_future(env):
+    env.tmdb_fake.shows[TMDB] = info(airing=True)
+    env.fake.lookup[TVDB] = lookup_result()
+    pending(env.fake, (1, 1, True), (1, 2, True), (2, 1, False), (2, 2, False))
+
+    async def sleep(_):
+        env.fake.refresh(101, NOW)
+    env._sleep = sleep
     await env.follow(TMDB)
-    assert writes(env.fake) == [("POST", "/api/v3/series"), ("PUT", "/api/v3/series/101")]
-    assert env.fake.calls[1][2]["monitorNewItems"] == "all"
+    assert monitored(env.fake) == [(2, 1), (2, 2)]
+    assert not any(c[2].get("name") == "SeasonSearch" for c in env.fake.calls if c[0] == "POST"
+                   and isinstance(c[2], dict) and "name" in c[2])
+
+
+@pytest.mark.anyio
+async def test_follow_new_series_gives_up_waiting(env):
+    env.tmdb_fake.shows[TMDB] = info(airing=True)
+    env.fake.lookup[TVDB] = lookup_result()
+    pending(env.fake, (1, 1, True), (1, 2, False))
+    waits = []
+
+    async def sleep(s):
+        waits.append(s)
+    env._sleep = sleep
+    page = await env.follow(TMDB)  # Sonarr never finishes: no episodes, no search
+    assert len(waits) == 30
+    assert writes(env.fake) == [("POST", "/api/v3/series")]
+    assert page["following"] is True
 
 
 @pytest.mark.anyio

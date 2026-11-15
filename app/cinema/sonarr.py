@@ -163,17 +163,25 @@ class SonarrClient:
         return [_series(d) for d in await self._request("GET", "/api/v3/series")]
 
     async def add_series(self, found: SonarrSeries, *, quality_profile_id: int,
-                         root_folder: str, series_type: str) -> SonarrSeries:
+                         root_folder: str, series_type: str,
+                         monitor: str = "none", monitored_seasons: frozenset[int] = frozenset(),
+                         search_missing: bool = False,
+                         monitor_new_items: str = "none") -> SonarrSeries:
+        """Add a series. Sonarr creates its episodes later (an async refresh) and only then
+        applies `addOptions`: `monitor` ("none", "future", or "skip" to keep the season
+        flags set here) and the missing-episode search. So choices made at add time go
+        here, not into follow-up calls."""
         body = {
             **found.raw,
             "qualityProfileId": quality_profile_id,
             "rootFolderPath": root_folder,
             "seriesType": series_type,
             "monitored": True,
-            "monitorNewItems": "none",
+            "monitorNewItems": monitor_new_items,
             "seasonFolder": True,
-            "seasons": [{**s, "monitored": False} for s in found.raw.get("seasons") or []],
-            "addOptions": {"monitor": "none", "searchForMissingEpisodes": False,
+            "seasons": [{**s, "monitored": s.get("seasonNumber") in monitored_seasons}
+                        for s in found.raw.get("seasons") or []],
+            "addOptions": {"monitor": monitor, "searchForMissingEpisodes": search_missing,
                            "searchForCutoffUnmetEpisodes": False},
         }
         return _series(await self._request("POST", "/api/v3/series", json=body))

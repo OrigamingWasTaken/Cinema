@@ -5,7 +5,7 @@ on behalf of the UI and reports each season's state for the show page.
 """
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from cinema.shows import ShowsTracker
@@ -83,13 +83,17 @@ def _has_files(s: SonarrSeries) -> bool:
 class ShowsService:
     def __init__(self, store: Store, sonarr: SonarrClient, tmdb: TmdbClient,
                  tracker: ShowsTracker, *, shows_dir: str,
-                 now: Callable[[], float] = time.time):
+                 now: Callable[[], float] = time.time,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 refresh_wait: float = 30.0):
         self.store = store
         self.sonarr = sonarr
         self.tmdb = tmdb
         self.tracker = tracker
         self.shows_dir = shows_dir
         self.now = now
+        self._sleep = sleep
+        self._refresh_wait = refresh_wait
         self._locks: dict[int, asyncio.Lock] = {}
 
     def _lock(self, tmdb_id: int) -> asyncio.Lock:
@@ -98,13 +102,9 @@ class ShowsService:
     async def _existing(self, tvdb_id: int) -> SonarrSeries | None:
         return next((s for s in await self.sonarr.all_series() if s.tvdb_id == tvdb_id), None)
 
-    async def _ensure(self, info: ShowInfo) -> SonarrSeries:
-        """The Sonarr series for a show, added (unmonitored) when it is missing."""
-        if info.tvdb_id is None:
-            raise NotAvailableError("show has no tvdb id")
-        existing = await self._existing(info.tvdb_id)
-        if existing is not None:
-            return existing
+    async def _add(self, info: ShowInfo, **add_options) -> SonarrSeries:
+        """Add the series (not yet in Sonarr). Sonarr creates the episodes asynchronously
+        and applies the add options after that, so first-time choices ride on the add."""
         found = await self.sonarr.lookup_tvdb(info.tvdb_id)
         if found is None:
             raise NotAvailableError("sonarr cannot find the show")
@@ -112,7 +112,19 @@ class ShowsService:
             "Cinema FR" if info.original_language == "fr" else "Cinema")
         return await self.sonarr.add_series(
             found, quality_profile_id=profile, root_folder=self.shows_dir,
-            series_type="anime" if info.anime else "standard")
+            series_type="anime" if info.anime else "standard", **add_options)
+
+    async def _wait_for_refresh(self, series: SonarrSeries) -> SonarrSeries:
+        """The series once Sonarr has created its episodes and applied the add options
+        (it clears `addOptions` then); the last read if that takes too long."""
+        waited = 0.0
+        while True:
+            fresh = next((s for s in await self.sonarr.all_series() if s.id == series.id),
+                         series)
+            if fresh.raw.get("addOptions") is None or waited >= self._refresh_wait:
+                return fresh
+            await self._sleep(1.0)
+            waited += 1.0
 
     @staticmethod
     def _set_season_monitored(series: SonarrSeries, season: int, monitored: bool) -> list[dict]:
@@ -172,8 +184,19 @@ class ShowsService:
     async def get_season(self, tmdb_id: int, season: int) -> dict:
         async with self._lock(tmdb_id):
             info = await self.tmdb.tv(tmdb_id)
-            series = await self._ensure(info)
-            await self._get_season(tmdb_id, series, season)
+            if info.tvdb_id is None:
+                raise NotAvailableError("show has no tvdb id")
+            series = await self._existing(info.tvdb_id)
+            if series is None:
+                # Sonarr has no episodes yet: let it monitor the season and search for it
+                # once its own refresh has created them.
+                series = await self._add(info, monitor="skip",
+                                         monitored_seasons=frozenset({season}),
+                                         search_missing=True)
+                self.store.set_season_requested(tmdb_id, season, self.now())
+                self.tracker.invalidate(series.id)
+            else:
+                await self._get_season(tmdb_id, series, season)
         return await self.page(tmdb_id)
 
     async def follow(self, tmdb_id: int) -> dict:
@@ -183,8 +206,14 @@ class ShowsService:
                 raise NotAvailableError("show has no tvdb id")
             if not info.airing:
                 raise NotAiringError("show is not airing")
-            series = await self._ensure(info)
-            series = await self.sonarr.update_series(series, monitorNewItems="all")
+            series = await self._existing(info.tvdb_id)
+            if series is None:
+                # "future" monitors what has not aired yet; wait for Sonarr to apply it
+                # (it needs its episodes) before looking at the airing season.
+                series = await self._add(info, monitor="future", monitor_new_items="all")
+                series = await self._wait_for_refresh(series)
+            else:
+                series = await self.sonarr.update_series(series, monitorNewItems="all")
             now = self.now()
             by_season: dict[int, list[SonarrEpisode]] = {}
             for e in await self.sonarr.episodes(series.id):

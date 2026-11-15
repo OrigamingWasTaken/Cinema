@@ -73,6 +73,23 @@ async def test_add_series_unmonitored_without_search():
 
 
 @pytest.mark.anyio
+async def test_add_series_with_first_time_choices():
+    fake = FakeSonarr()
+    fake.lookup[81189] = lookup_result()
+    client = make(fake)
+    found = await client.lookup_tvdb(81189)
+    await client.add_series(found, quality_profile_id=1, root_folder="/tv",
+                            series_type="standard", monitor="skip",
+                            monitored_seasons=frozenset({1}), search_missing=True,
+                            monitor_new_items="all")
+    body = fake.calls[0][2]
+    assert body["monitorNewItems"] == "all"
+    assert {s["seasonNumber"]: s["monitored"] for s in body["seasons"]} == {0: False, 1: True}
+    assert body["addOptions"] == {"monitor": "skip", "searchForMissingEpisodes": True,
+                                  "searchForCutoffUnmetEpisodes": False}
+
+
+@pytest.mark.anyio
 async def test_monitor_and_season_search_calls():
     fake = FakeSonarr()
     client = make(fake)

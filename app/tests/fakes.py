@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+from datetime import datetime
 from urllib.parse import unquote
 
 import httpx
@@ -236,8 +237,48 @@ class FakeSonarr:
         self.calls: list[tuple[str, str, object]] = []
         self.requests: list[httpx.Request] = []
         self.fail_status: int | None = None
+        # tvdb id -> episode dicts (seasonNumber, episodeNumber, airDateUtc, ...) that
+        # Sonarr "fetches" when it refreshes a newly added series (see refresh)
+        self.pending_episodes: dict[int, list[dict]] = {}
         self._next_id = 100
         self.transport = httpx.MockTransport(self._handle)
+
+    def refresh(self, series_id: int, now: float) -> None:
+        """Sonarr's async post-add work (RefreshSeries, then SeriesScannedHandler).
+
+        Creates the series' episodes (monitored like their season), then applies and clears
+        addOptions: monitor "skip" keeps the season flags, "none" unmonitors everything,
+        "future" monitors episodes airing after `now` and the last season; a missing-episode
+        search is queued when asked for.
+        """
+        series = self.series[series_id]
+        opts = series.get("addOptions")
+        seasons = {s["seasonNumber"]: s for s in series.get("seasons") or []}
+        made = []
+        for tmpl in self.pending_episodes.get(series["tvdbId"], []):
+            self._next_id += 1
+            season = seasons.get(tmpl["seasonNumber"])
+            made.append({"id": self._next_id, "seriesId": series_id, "title": "",
+                         "monitored": bool(season and season["monitored"]),
+                         "hasFile": False, "episodeFileId": 0, **tmpl})
+        self.episodes += made
+        if opts is None:
+            return
+        if opts["monitor"] in ("none", "future"):
+            last = max(seasons, default=0)
+            for e in made:
+                at = datetime.fromisoformat(e["airDateUtc"].replace("Z", "+00:00")).timestamp()
+                e["monitored"] = opts["monitor"] == "future" and at > now
+            for n, s in seasons.items():
+                s["monitored"] = (opts["monitor"] == "future" and n > 0 and n == last
+                                  and series.get("status") == "continuing") or \
+                    any(e["monitored"] for e in made if e["seasonNumber"] == n)
+        if opts["monitor"] == "none":
+            series["monitored"] = False
+        if opts.get("searchForMissingEpisodes"):
+            self.calls.append(("POST", "/api/v3/command",
+                               {"name": "MissingEpisodeSearch", "seriesId": series_id}))
+        series["addOptions"] = None
 
     @staticmethod
     def _json(status: int, body) -> httpx.Response:
