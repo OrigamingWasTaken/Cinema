@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import stat
 import os
 import subprocess
@@ -973,21 +974,62 @@ class TestTailscale(unittest.TestCase):
 
     def test_running_prints_address_and_policy(self):
         out, _ = run_main(status=RUNNING)
-        self.assertIn("cinema.tail1234.ts.net", out)
-        self.assertIn("tag:cinema", out)
+        self.assertIn("http://cinema.tail1234.ts.net:8888", out)
+        self.assertIn("http://100.64.0.7:8888", out)  # without MagicDNS
+        self.assertIn('"hosts": {"cinema": "100.64.0.7"}', out)
+        self.assertNotIn("tag:", out)
         self.assertNotIn("re-run", out)
+        # paste the policy first, then invite or share
+        self.assertLess(out.index('"grants"'), out.index("invite"))
 
     def test_access_policy_mentions_only_8888(self):
         import re
         import setup
-        snippet = setup.ACCESS_POLICY_SNIPPET
+        snippet = setup.access_policy("100.64.0.7")
         self.assertIn('"grants"', snippet)
-        self.assertIn("group:family", snippet)
-        self.assertIn("autogroup:shared", snippet)
-        self.assertIn("tag:cinema", snippet)
-        self.assertIn("tagOwners", snippet)
+        self.assertIn('"hosts": {"cinema": "100.64.0.7"}', snippet)
+        self.assertIn('{"src": ["autogroup:admin"], "dst": ["*"], "ip": ["*"]}', snippet)
+        self.assertIn('{"src": ["group:family", "autogroup:shared"], "dst": ["cinema"], '
+                      '"ip": ["tcp:8888"]}', snippet)
+        self.assertNotIn("tag:", snippet)
+        self.assertNotIn("tagOwners", snippet)
         self.assertEqual(re.findall(r"(?:tcp|udp):[\w*-]+", snippet), ["tcp:8888"])
         self.assertIn("allow-all", snippet)
+        # the JSON part parses once the // comments are gone
+        body = "\n".join(l for l in snippet.splitlines() if not l.lstrip().startswith("//"))
+        self.assertEqual(json.loads(body)["hosts"], {"cinema": "100.64.0.7"})
+
+    def test_tailscale_ipv4(self):
+        import setup
+        self.assertEqual(setup.tailscale_ipv4(RUNNING), "100.64.0.7")
+        self.assertEqual(setup.tailscale_ipv4({"TailscaleIPs": ["fd7a::7", "100.64.0.9"]}),
+                         "100.64.0.9")
+        self.assertIsNone(setup.tailscale_ipv4(NEEDS_LOGIN))
+        self.assertIsNone(setup.tailscale_ipv4(None))
+
+    def test_policy_without_a_known_ip_says_where_to_find_it(self):
+        out, _ = run_main(status=None)
+        self.assertIn("100.x.y.z", out)
+        self.assertIn("Machines", out)
+
+    def test_needs_login_without_a_link_does_not_point_above(self):
+        no_link = dict(NEEDS_LOGIN, AuthURL="")
+        out, _ = run_main(status=no_link)
+        self.assertNotIn("link above", out)
+        self.assertIn("docker logs tailscale", out)
+        self.assertIn("re-run", out)
+        out, _ = run_main(status=NEEDS_LOGIN)
+        self.assertIn("link above", out)
+
+    def test_readme_policy_before_invite_and_magicdns(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "README.md")
+        with open(path) as f:
+            text = f.read()
+        away = text[text.index("## Watching away from home"):text.index("## Infuse setup")]
+        self.assertLess(away.index("access policy"), away.index("invite"))
+        self.assertNotIn("tag:cinema", away)
+        self.assertIn("MagicDNS", away)
+        self.assertIn("http://cinema:8888", away)
 
     def test_authkey_never_printed(self):
         out, _ = run_main(extra_env={"TS_AUTHKEY": "tskey-auth-SECRET123"}, status=NEEDS_LOGIN)

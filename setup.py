@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.request import Request, urlopen
 
 
@@ -602,18 +602,28 @@ def infuse_login_lines(dav_user: Optional[str], dav_password: Optional[str]) -> 
 TAILSCALE_WAIT_STEPS = 40  # x 3 s = 120 s
 TAILSCALE_PORT = 8888
 
-# A grants example; tcp:8888 is the only port the family and shared users get.
-ACCESS_POLICY_SNIPPET = """\
-// Paste this in the Tailscale admin console -> Access controls.
-// It REPLACES the default allow-all policy, so keep the first grant for your own devices.
-{
-  "tagOwners": {"tag:cinema": ["autogroup:admin"]},
-  "groups": {"group:family": ["mom@example.com", "dad@example.com"]},
-  "grants": [
-    {"src": ["autogroup:admin"], "dst": ["*"], "ip": ["*"]},
-    {"src": ["group:family", "autogroup:shared"], "dst": ["tag:cinema"], "ip": ["tcp:8888"]}
-  ]
-}"""
+
+def access_policy(ip: Optional[str]) -> str:
+    """A grants policy: tcp:8888 on the cinema machine (named by its Tailscale IP, so it
+    works before anything else is set up) is all the family and shared users get."""
+    lines = [
+        "// Paste this in the Tailscale admin console -> Access controls FIRST, before family",
+        "// joins your tailnet or gets the machine shared.",
+        "// It REPLACES the default allow-all policy, so keep the first grant for your own devices.",
+    ]
+    if not ip:
+        lines.append("// Replace 100.x.y.z with cinema's Tailscale IP (admin console -> Machines).")
+    lines += [
+        "{",
+        '  "hosts": {"cinema": "%s"},' % (ip or "100.x.y.z"),
+        '  "groups": {"group:family": ["mom@example.com", "dad@example.com"]},',
+        '  "grants": [',
+        '    {"src": ["autogroup:admin"], "dst": ["*"], "ip": ["*"]},',
+        '    {"src": ["group:family", "autogroup:shared"], "dst": ["cinema"], "ip": ["tcp:8888"]}',
+        "  ]",
+        "}",
+    ]
+    return "\n".join(lines)
 
 
 def tailscale_status() -> Optional[dict]:
@@ -647,10 +657,19 @@ def tailscale_address(status: Optional[dict]) -> Optional[str]:
     return ips[0] if ips else None
 
 
-def wait_for_tailscale() -> Optional[dict]:
+def tailscale_ipv4(status: Optional[dict]) -> Optional[str]:
+    """The machine's Tailscale IPv4 address (100.x.y.z), if it has one yet."""
+    for ip in (status or {}).get("TailscaleIPs") or []:
+        if "." in ip:
+            return ip
+    return None
+
+
+def wait_for_tailscale() -> Tuple[Optional[dict], bool]:
     """Poll for up to 120 s until Tailscale runs, printing the login link once.
 
-    Returns the last status seen (None when the container never answered).
+    Returns the last status seen (None when the container never answered) and whether a
+    login link was printed.
     """
     status = None
     shown = False
@@ -662,24 +681,28 @@ def wait_for_tailscale() -> Optional[dict]:
             print(f"    {url}")
             shown = True
         if status and status.get("BackendState") == "Running":
-            return status
+            return status, shown
         if step < TAILSCALE_WAIT_STEPS - 1:
             time.sleep(3)
-    return status
+    return status, shown
 
 
 def check_tailscale() -> Optional[dict]:
     """Phase 7: never fails setup; warns when Tailscale is not usable yet."""
     try:
-        status = wait_for_tailscale()
+        status, shown = wait_for_tailscale()
     except Exception as e:
         print(f"  WARNING: could not check Tailscale: {e}")
         return None
     if status is None:
         print("  WARNING: could not read Tailscale's status (is the tailscale container up?).")
-    elif status.get("BackendState") == "NeedsLogin":
+    elif status.get("BackendState") == "NeedsLogin" and shown:
         print("  Tailscale is still waiting for a login. Open the link above, sign in,")
         print("  then re-run: sudo python3 setup.py")
+    elif status.get("BackendState") == "NeedsLogin":
+        print("  Tailscale is waiting for a login but gave no link yet. Find it with")
+        print("    sudo docker logs tailscale")
+        print("  (or set TS_AUTHKEY in .env), sign in, then re-run: sudo python3 setup.py")
     elif status.get("BackendState") != "Running":
         print(f"  WARNING: Tailscale is {status.get('BackendState')}, not Running yet.")
     else:
@@ -777,12 +800,18 @@ def main():
         print(line)
     print("  3. Settings -> Subtitles: auto-download, English.")
     print("  Infuse: Shows appear in the same share")
-    away = tailscale_address(tailscale) if tailscale_login_url(tailscale) is None else None
+    logged_in = tailscale is not None and tailscale.get("BackendState") != "NeedsLogin"
+    away = tailscale_address(tailscale) if logged_in else None
+    ts_ip = tailscale_ipv4(tailscale) if logged_in else None
     if away:
         print("\nPhones away from home (Tailscale app signed in):")
         print(f"  http://{away}:{TAILSCALE_PORT}")
+        if ts_ip and ts_ip != away:
+            print(f"  or http://{ts_ip}:{TAILSCALE_PORT} (works without MagicDNS)")
     print("\nTailscale access policy (family gets only the cinema app):")
-    print(ACCESS_POLICY_SNIPPET)
+    print(access_policy(ts_ip))
+    print("Once it is saved, invite family to your tailnet or share the cinema machine")
+    print("(admin console -> Machines -> cinema -> Share).")
     if hardlink_problem is not None:
         print()
         print(f"ERROR: hardlinks from downloads/ to shows/ do not work: {hardlink_problem}")

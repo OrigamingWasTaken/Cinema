@@ -147,16 +147,18 @@ name `cinema`. Nothing is opened to the internet.
 1. Install Tailscale on each device (phone, laptop) and sign in.
 2. After `sudo python3 setup.py`, open the login link it prints once. If you
    set `TS_AUTHKEY` in `.env` (optional), no link is needed.
-3. To let family in, either invite them to your tailnet or share the `cinema`
-   machine with them from the Tailscale admin console (Machines -> cinema ->
-   Share).
-4. Limit them to the web app. Tag the machine `tag:cinema`, then paste the
-   access policy that setup prints into the admin console (Access controls).
-   It replaces the default allow-all policy: family and shared users get only
-   port 8888, and the first grant keeps your own full access. Put your family's
-   emails in `group:family`.
+3. Paste the access policy that setup prints into the Tailscale admin console
+   (Access controls) before anyone else gets in. It names the `cinema` machine
+   by its Tailscale IP, which setup fills in. It replaces the default allow-all
+   policy: family and shared users get only port 8888, and the first grant
+   keeps your own full access. Put your family's emails in `group:family`.
+   Until it is saved, anyone you let in can reach the whole NAS (DSM, SSH,
+   file shares, Sonarr, Prowlarr).
+4. Then let family in: invite them to your tailnet, or share the `cinema`
+   machine with them (Machines -> cinema -> Share).
 5. Away from home, open `http://<name>.ts.net:8888` (setup prints the exact
-   name).
+   name). With MagicDNS on (the default for new tailnets), `http://cinema:8888`
+   works too. Without it, use the `http://100.x.y.z:8888` address setup prints.
 
 At home, use `cinema.local`. Away, use the Tailscale name. They count as
 different addresses, so where you stopped watching does not carry over between
