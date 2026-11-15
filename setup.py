@@ -431,12 +431,13 @@ class SonarrConfigurator(ArrClient):
             print("  Sonarr completed download handling enabled")
 
     def _ensure_hardlinks(self):
+        # Imports hardlink, and a proper or repack never replaces a file already on the TV.
+        wanted = {"copyUsingHardlinks": True, "downloadPropersAndRepacks": "doNotUpgrade"}
         conf = self._request("GET", "/config/mediamanagement")
-        if conf.get("copyUsingHardlinks"):
+        if all(conf.get(k) == v for k, v in wanted.items()):
             return
-        self._request("PUT", f"/config/mediamanagement/{conf['id']}",
-                      dict(conf, copyUsingHardlinks=True))
-        print("  Sonarr set to import with hardlinks")
+        self._request("PUT", f"/config/mediamanagement/{conf['id']}", dict(conf, **wanted))
+        print("  Sonarr set to import with hardlinks, without proper/repack upgrades")
 
     def _ensure_custom_format(self) -> int:
         for cf in self._request("GET", "/customformat"):

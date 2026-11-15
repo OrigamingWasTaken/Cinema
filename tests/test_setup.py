@@ -600,6 +600,7 @@ class TestSonarrConfigurator(unittest.TestCase):
                          ("rqbit", 3030, "/", False))
 
         self.assertIs(state["mediamanagement"]["copyUsingHardlinks"], True)
+        self.assertEqual(state["mediamanagement"]["downloadPropersAndRepacks"], "doNotUpgrade")
         self.assertIs(state["downloadclientconfig"]["enableCompletedDownloadHandling"], True)
 
         (cf,) = state["customformat"]
@@ -636,6 +637,18 @@ class TestSonarrConfigurator(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             cfg.configure()
         self.assertEqual([c for c in calls if c[0] in ("POST", "PUT", "DELETE")], [])
+
+    def test_sonarr_stops_proper_and_repack_upgrades(self):
+        cfg, calls, state = make_sonarr({"mediamanagement": {
+            "id": 1, "copyUsingHardlinks": True, "downloadPropersAndRepacks": "preferAndUpgrade",
+            "recycleBin": "/keep"}})
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.configure()
+        puts = [c for c in calls if c[:2] == ("PUT", "/config/mediamanagement/1")]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(state["mediamanagement"], {
+            "id": 1, "copyUsingHardlinks": True, "downloadPropersAndRepacks": "doNotUpgrade",
+            "recycleBin": "/keep"})
 
     def test_sonarr_quality_groups_cutoff_uses_group_id(self):
         cfg, calls, state = make_sonarr()
