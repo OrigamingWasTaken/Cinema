@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -21,6 +22,9 @@ log = logging.getLogger(__name__)
 Segment = tuple[float, float]  # (start, length) in seconds from the file start
 
 LOOKAHEAD = 3       # a request this many segments past the newest written one waits
+MAX_AHEAD = 5       # ffmpeg pauses once it has written this far past the last request
+KEEP_BEHIND = 10    # segment files further behind the last request are deleted
+PACE_S = 0.5        # how often run_reaper checks how far ahead ffmpeg is
 SEEK_MARGIN = 0.2   # see FfmpegRunner.command
 AUDIO_START = 0.1   # see FfmpegRunner.command
 MOVFLAGS = "+frag_custom+empty_moov+default_base_moof+frag_discont+negative_cts_offsets+skip_trailer"
@@ -67,6 +71,10 @@ class Proc(Protocol):
 
     def kill(self) -> None: ...
 
+    def pause(self) -> None: ...
+
+    def resume(self) -> None: ...
+
 
 class Runner(Protocol):
     def start(self, path: Path, info: MediaInfo, segments: list[Segment], first: int,
@@ -80,9 +88,23 @@ class _Process:
     def done(self) -> bool:
         return self._popen.poll() is not None
 
+    def pause(self) -> None:
+        self._signal(signal.SIGSTOP)
+
+    def resume(self) -> None:
+        self._signal(signal.SIGCONT)
+
+    def _signal(self, sig: int) -> None:
+        if self._popen.poll() is None:
+            try:
+                self._popen.send_signal(sig)
+            except ProcessLookupError:
+                pass
+
     def kill(self) -> None:
         if self._popen.poll() is None:
-            self._popen.kill()
+            self._popen.kill()  # SIGKILL also ends a stopped process
+            self._signal(signal.SIGCONT)
         try:
             self._popen.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -120,7 +142,12 @@ class FfmpegRunner:
             cuts.append((before + s) / 2 - start)
         times = ",".join(f"{t:.6f}" for t in cuts or [1e9])
 
-        cmd = ["nice", "-n", "10", "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+        # Low CPU priority, and idle IO priority where ionice exists, so rqbit and
+        # WebDAV (Infuse) always come first.
+        cmd = ["nice", "-n", "10"]
+        if shutil.which("ionice"):
+            cmd += ["ionice", "-c3"]
+        cmd += ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                "-noaccurate_seek", "-ss", f"{seek:.6f}", "-copyts", "-start_at_zero",
                "-i", f"file:{path}", "-map", "0:v:0"]
         if info.audio_codec:
@@ -160,6 +187,8 @@ class _Run:
     dir: Path
     proc: Proc
     newest: int  # highest segment file seen so far
+    kept_from: int  # files below this index have been deleted
+    paused: bool = False
 
 
 @dataclass
@@ -170,6 +199,7 @@ class _Session:
     last_used: float
     run: _Run | None = None
     runs: int = 0
+    requested: int = 0  # the last segment the client asked for
 
 
 class StreamSessions:
@@ -177,6 +207,8 @@ class StreamSessions:
 
     Each ffmpeg run writes into its own directory; a restart (seek) kills the run and
     deletes its directory, so a file is never served while a newer run rewrites it.
+    ffmpeg is paused (SIGSTOP) once it is MAX_AHEAD segments past the last request and
+    resumed when playback catches up; files more than KEEP_BEHIND behind are deleted.
     """
 
     def __init__(self, *, tmp_root: Path, runner: Runner = FfmpegRunner(),
@@ -208,6 +240,7 @@ class StreamSessions:
             os.replace(s.dir / "init.mp4.part", kept)
         except OSError as e:
             raise MediaError(f"cannot keep the init segment: {e}") from e
+        self._pace(s)
         s.last_used = self._now()
         return kept
 
@@ -217,8 +250,11 @@ class StreamSessions:
         if not 0 <= n < len(s.segments):
             raise IndexError(f"no segment {n}")
         run = s.run
-        if run is None or n < run.first or n > self._newest(run) + LOOKAHEAD:
+        s.requested = n
+        if run is None or n < run.kept_from or n > self._newest(run) + LOOKAHEAD:
             run = self._start(s, path, info, n)
+        self._trim(run, n)
+        self._pace(s)
         f, after = run.dir / f"{n}.m4s", run.dir / f"{n + 1}.m4s"
         # A segment is complete once ffmpeg has opened the next one, or has ended.
         await self._wait(s, run, lambda ended: f.exists() and (ended or after.exists()),
@@ -232,16 +268,25 @@ class StreamSessions:
             if now - s.last_used >= self.idle_s:
                 log.info("closing idle stream session %s", s.key)
                 self._close(s)
+            else:
+                self._pace(s)
 
     async def close_all(self) -> None:
         for s in list(self._sessions.values()):
             self._close(s)
 
     async def run_reaper(self, interval: float = 10.0) -> None:
+        """Reap idle sessions every `interval`; between those, keep ffmpeg paced."""
+        last = time.monotonic()
         while True:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(min(PACE_S, interval))
             try:
-                self.reap()
+                if time.monotonic() - last >= interval:
+                    last = time.monotonic()
+                    self.reap()
+                else:
+                    for s in list(self._sessions.values()):
+                        self._pace(s)
             except Exception:
                 log.exception("stream session reaper failed")
 
@@ -268,7 +313,7 @@ class StreamSessions:
         s.runs += 1
         out = s.dir / f"run{s.runs}"
         proc = self.runner.start(path, info, s.segments, first, out)
-        s.run = _Run(first, out, proc, first - 1)
+        s.run = _Run(first, out, proc, first - 1, first)
         return s.run
 
     @staticmethod
@@ -282,6 +327,27 @@ class StreamSessions:
             self._stop(s.run)
             s.run = None
         shutil.rmtree(s.dir, ignore_errors=True)
+
+    def _pace(self, s: _Session) -> None:
+        """Pause ffmpeg once it is MAX_AHEAD segments past the last request, so converted
+        segments don't pile up and the disk stays free for other readers."""
+        run = s.run
+        if run is None or run.proc.done():
+            return
+        far = self._newest(run) >= max(s.requested, run.first) + MAX_AHEAD
+        if far and not run.paused:
+            run.proc.pause()
+            run.paused = True
+        elif not far and run.paused:
+            run.proc.resume()
+            run.paused = False
+
+    @staticmethod
+    def _trim(run: _Run, requested: int) -> None:
+        """Delete segment files more than KEEP_BEHIND behind the last request."""
+        while run.kept_from < requested - KEEP_BEHIND:
+            (run.dir / f"{run.kept_from}.m4s").unlink(missing_ok=True)
+            run.kept_from += 1
 
     @staticmethod
     def _newest(run: _Run) -> int:
@@ -298,6 +364,9 @@ class StreamSessions:
             ended = run.proc.done()  # read before the files, so a final write is seen
             if ready(ended):
                 return
+            if run.paused:  # another request moved back meanwhile; this one needs more
+                run.proc.resume()
+                run.paused = False
             if ended:
                 raise MediaError(f"ffmpeg ended without writing {what}")
             if time.monotonic() >= deadline:

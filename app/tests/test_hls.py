@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cinema.hls import (BusyError, FfmpegRunner, StreamSessions, plan_segments,
+from cinema.hls import (BusyError, FfmpegRunner, StreamSessions, _Process, plan_segments,
                         render_playlist)
 from cinema.media import MediaError, MediaInfo, Prober
 
@@ -48,12 +48,21 @@ class FakeProc:
     def __init__(self):
         self.killed = False
         self.finished = False
+        self.paused = False
+        self.pauses = 0
 
     def done(self):
         return self.finished or self.killed
 
     def kill(self):
         self.killed = True
+
+    def pause(self):
+        self.paused = True
+        self.pauses += 1
+
+    def resume(self):
+        self.paused = False
 
 
 class FakeRunner:
@@ -195,13 +204,81 @@ async def test_ended_process_without_the_segment_is_media_error(tmp_path):
         await s.segment(("d1", "m1"), tmp_path / "f.mkv", INFO, 2)
 
 
+@pytest.mark.anyio
+async def test_ffmpeg_paused_when_far_ahead_and_resumed(tmp_path):
+    runner = FakeRunner(ahead=10)  # writes 0..9 at once
+    s = sessions_for(tmp_path, runner)
+    key, f = ("d1", "m1"), tmp_path / "f.mkv"
+    await s.segment(key, f, INFO, 0)
+    proc = runner.procs[0]
+    assert proc.paused  # newest written 9 >= requested 0 + 5
+    await s.segment(key, f, INFO, 4)
+    assert proc.paused  # 9 >= 4 + 5
+    await s.segment(key, f, INFO, 5)
+    assert not proc.paused  # 9 < 5 + 5: let ffmpeg write on
+    # the reaper's check pauses it again once it is far enough ahead
+    for n in range(10, 12):
+        (s._sessions[key].run.dir / f"{n}.m4s").write_bytes(b"x")
+    s.reap()
+    assert proc.paused and proc.pauses == 2
+    # a restart kills the paused process and starts a fresh, running one
+    runner.ahead = 3
+    await s.segment(key, f, INFO, 40)
+    assert proc.killed
+    assert runner.procs[1].pauses == 0
+
+
+@pytest.mark.anyio
+async def test_old_segments_deleted(tmp_path):
+    runner = FakeRunner(ahead=30)
+    s = sessions_for(tmp_path, runner)
+    key, f = ("d1", "m1"), tmp_path / "f.mkv"
+    await s.init(key, f, INFO)
+    for n in range(0, 16):
+        await s.segment(key, f, INFO, n)
+    run_dir = s._sessions[key].run.dir
+    left = sorted(int(p.stem) for p in run_dir.glob("*.m4s"))
+    assert left[0] == 5  # 15 - 10: older ones are gone
+    assert (s._sessions[key].dir / "init.mp4").exists()
+    # a deleted segment is made again by a restart, not waited for
+    assert (await s.segment(key, f, INFO, 2)).read_bytes() == b"seg2"
+    assert runner.starts == [0, 2]
+
+
+@pytest.mark.anyio
+async def test_paused_session_reaped_cleanly(tmp_path):
+    runner = FakeRunner(ahead=10)
+    clock = Clock()
+    s = sessions_for(tmp_path, runner, clock)
+    await s.segment(("d1", "m1"), tmp_path / "f.mkv", INFO, 0)
+    assert runner.procs[0].paused
+    clock.t += 60
+    s.reap()
+    assert runner.procs[0].killed
+    assert list((tmp_path / "hls").iterdir()) == []
+
+
+@pytest.mark.skipif(shutil.which("sleep") is None, reason="no sleep")
+def test_paused_process_can_be_killed():
+    proc = _Process(subprocess.Popen(["sleep", "30"]))
+    proc.pause()
+    assert not proc.done()
+    proc.resume()
+    proc.pause()
+    proc.kill()
+    assert proc.done()
+
+
 def test_ffmpeg_command_shape(tmp_path):
     info = MediaInfo(30.0, "mkv", "hevc", "hvc1.1.6.L93.90", "ac3",
                      (0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0))
     segs = plan_segments(info.keyframes, info.duration)
     cmd = FfmpegRunner().command(Path("/m/f.mkv"), info, segs, 1, tmp_path)
     assert cmd[:3] == ["nice", "-n", "10"]
-    assert cmd[3] == "ffmpeg"
+    if shutil.which("ionice"):
+        assert cmd[3:6] == ["ionice", "-c3", "ffmpeg"]
+    else:
+        assert cmd[3] == "ffmpeg"
     i = cmd.index("-i")
     assert cmd[i + 1] == "file:/m/f.mkv"
     ss = cmd.index("-ss")
