@@ -31,6 +31,16 @@
   const nothingFound = $derived(
     !!results && !results.films.length && !results.people.length && !results.studios.length && !results.collections.length);
 
+  // An exact name match (a person first, else a studio) goes above the films.
+  const lead = $derived.by((): "people" | "studios" | null => {
+    if (!results) return null;
+    const q = resultsFor.trim().toLowerCase();
+    if (!q) return null;
+    if (results.people.some((p) => p.name.trim().toLowerCase() === q)) return "people";
+    if (results.studios.some((s) => s.name.trim().toLowerCase() === q)) return "studios";
+    return null;
+  });
+
   // Genre chips for before you type. Loaded once; a failure just leaves them out
   // until the tab is opened again or the field is cleared.
   let genres = $state<Genre[] | null>(null);
@@ -153,19 +163,37 @@
     {#if nothingFound}
       <EmptyState icon="search" title={t("no_results")} text={t("no_results_hint")} />
     {:else}
-      <div class="results">
-        {#if results.films.length}
+      {#snippet filmsGroup(r: SearchData)}
+        {#if r.films.length}
           <section class="films">
             <h2 class="section-title">{t("films")}</h2>
-            <PosterGrid items={cards(results.films)} />
+            <PosterGrid items={cards(r.films)} />
           </section>
         {/if}
-        {#if results.people.length}
-          <PersonRow people={results.people} />
+      {/snippet}
+      {#snippet peopleGroup(r: SearchData)}
+        {#if r.people.length}
+          <PersonRow people={r.people} />
         {/if}
-        {#if results.studios.length}
+      {/snippet}
+      {#snippet studiosGroup(r: SearchData)}
+        {#if r.studios.length}
           <TileRow title={t("studios")} variant="logo"
-                   tiles={results.studios.map((s) => ({ id: s.id, name: s.name, href: `#/studio/${s.id}`, path: s.logo_path }))} />
+                   tiles={r.studios.map((s) => ({ id: s.id, name: s.name, href: `#/studio/${s.id}`, path: s.logo_path }))} />
+        {/if}
+      {/snippet}
+      <div class="results">
+        {#if lead === "people"}
+          {@render peopleGroup(results)}
+        {:else if lead === "studios"}
+          {@render studiosGroup(results)}
+        {/if}
+        {@render filmsGroup(results)}
+        {#if lead !== "people"}
+          {@render peopleGroup(results)}
+        {/if}
+        {#if lead !== "studios"}
+          {@render studiosGroup(results)}
         {/if}
         {#if results.collections.length}
           <TileRow title={t("collections")} variant="poster"
