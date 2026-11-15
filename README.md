@@ -136,6 +136,9 @@ It needs:
 - Some files play directly. The rest are converted on the fly (video is never
   re-encoded, only the audio).
 - HEVC files need Safari or a recent Chrome.
+- The first time a converted file plays, the player can show "Getting ready…"
+  for a minute or two while the NAS reads the file once. After that it starts
+  at once.
 - Two people can watch in a browser at once. A third is told the NAS is busy.
 - There are no subtitles in the browser. Use Infuse for those.
 
