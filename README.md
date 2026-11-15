@@ -96,10 +96,11 @@ It needs:
 
 1. Open the Cinema web app on the phone (`http://192.168.x.x:8888`) and add it
    to the home screen.
-2. Search for a movie.
-3. Tap **Recommended**, or **More** to pick a specific version.
+2. Find a movie on **Home** or under **Search**.
+3. Tap **Recommended**, or **More versions** to pick a specific version.
 4. Within about 2 minutes it shows up in Infuse under Cinema -> Movies. You can
-   press play while it is still downloading.
+   press play while it is still downloading. **Downloads** shows the progress;
+   **Library** lists the films that are on the TV.
 
 ## Infuse setup (Apple TV)
 
@@ -124,11 +125,26 @@ cinema state and the rqbit database.
 
 - A far seek waits about 20 s while that part of the file downloads.
 - "Couldn't download" means no peers for 10 minutes. Pick another version
-  under **More**.
+  under **More versions**.
 - The Infuse share does not work: check that it is WebDAV, not SMB, with port
   8888 and path `/dav`.
 - Memory is small: cinema uses about 55 MiB and rqbit about 20 MiB.
   `sudo docker stats --no-stream` shows the current numbers.
+
+## Phone app development
+
+The phone app is Svelte 5 + Vite in `app/web/`. The Docker image builds it; the
+build output (`app/cinema/static/`) is not committed.
+
+```bash
+cd app/web
+npm ci
+npm run dev       # http://localhost:5173, proxies /api to a backend on :8888
+npm run build     # writes app/cinema/static/ for the FastAPI app to serve
+npm run check     # type-check
+```
+
+The backend tests do not need Node: `cd app && .venv/bin/python -m pytest -q`.
 
 ## Legal note
 
