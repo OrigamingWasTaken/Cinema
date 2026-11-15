@@ -1,5 +1,6 @@
 // UI copy. French when the browser language starts with "fr", English otherwise.
-// The first block of each language is the v1 copy table, kept word for word.
+// The first block of each language is the v1 copy table, kept word for word
+// (none_found now names the "More versions" button).
 const en = {
   recommended: "Recommended",
   more: "More",
@@ -14,7 +15,7 @@ const en = {
   downloading: "Downloading {n}% · {m} min left",
   done: "On the TV",
   failed: "Couldn't download — try another version",
-  none_found: "No good version yet — try More",
+  none_found: "No good version yet — try More versions",
   remove: "Remove",
   remove_confirm: "Remove this movie from the TV?",
   standard: "Standard",
@@ -77,7 +78,7 @@ const fr: Record<Key, string> = {
   downloading: "Téléchargement {n} % · {m} min restantes",
   done: "Sur la TV",
   failed: "Échec du téléchargement — essayez une autre version",
-  none_found: "Pas encore de bonne version — essayez Plus",
+  none_found: "Pas encore de bonne version — essayez Plus de versions",
   remove: "Supprimer",
   remove_confirm: "Supprimer ce film de la TV ?",
   standard: "Standard",

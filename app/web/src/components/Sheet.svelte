@@ -4,6 +4,7 @@
   import { fade, fly } from "svelte/transition";
   import { t } from "../lib/i18n";
   import { ms } from "../lib/motion";
+  import { portal, ui } from "../lib/ui.svelte";
   import Icon from "./Icon.svelte";
 
   // A bottom sheet. The page behind it stops scrolling; the scrim, the close button,
@@ -15,11 +16,14 @@
 
   $effect(() => {
     document.body.classList.add("locked");
+    ui.sheetOpen = true;
     const opener = document.activeElement as HTMLElement | null;
     panel?.focus({ preventScroll: true });
     return () => {
       document.body.classList.remove("locked");
-      opener?.focus?.({ preventScroll: true });
+      ui.sheetOpen = false;
+      // Wait a frame so the page is no longer inert before focus goes back to it.
+      requestAnimationFrame(() => opener?.focus?.({ preventScroll: true }));
     };
   });
 
@@ -30,7 +34,8 @@
 
 <svelte:window onkeydown={keydown} />
 
-<div class="layer">
+<!-- Rendered under <body> so the page behind it can be made inert (focus stays in the sheet). -->
+<div class="layer" use:portal>
   <button class="scrim" type="button" tabindex="-1" aria-label={t("close")} onclick={onclose}
           transition:fade={{ duration: ms(220) }}></button>
   <div class="sheet" role="dialog" aria-modal="true" aria-label={title} tabindex="-1" bind:this={panel}

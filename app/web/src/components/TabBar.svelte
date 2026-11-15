@@ -2,6 +2,7 @@
   import { catalog } from "../lib/catalog.svelte";
   import { t, type StringKey } from "../lib/i18n";
   import { router, selectTab, tabHref, TABS, type Tab } from "../lib/router.svelte";
+  import { ui } from "../lib/ui.svelte";
   import Icon from "./Icon.svelte";
 
   const LABELS: Record<Tab, StringKey> = {
@@ -19,7 +20,7 @@
   }
 </script>
 
-<nav class="tabbar" aria-label="Cinema">
+<nav class="tabbar" aria-label="Cinema" inert={ui.sheetOpen}>
   {#each TABS as tab (tab)}
     {@const current = router.route.tab === tab}
     <a class="tab" class:current href={tabHref(tab)} aria-current={current ? "page" : undefined}

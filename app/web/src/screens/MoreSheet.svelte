@@ -70,7 +70,7 @@
 {#snippet releaseRow(rel: ReleaseView)}
   {@const picked = pick === rel.id}
   <li>
-    <button class="release" class:picked type="button" role="radio" aria-checked={picked} onclick={() => choose(rel)}>
+    <button class="release" class:picked type="button" aria-pressed={picked} onclick={() => choose(rel)}>
       <span class="size">{gigabytes(rel.size_bytes)}</span>
       <span class="facts">
         {#each facts(rel) as fact, i (i)}<span class="fact">{fact}</span>{/each}
@@ -91,7 +91,7 @@
 <Sheet {title} subtitle={t("choose_version")} {onclose} footer={data && data.groups.length ? footer : undefined}>
   {#if data}
     {#if data.groups.length}
-      <div role="radiogroup" aria-label={t("choose_version")}>
+      <div>
         {#each data.groups as group (group.resolution)}
           <section class="group">
             <h3 class="res">{group.resolution}p</h3>

@@ -8,7 +8,7 @@
   import { catalog } from "../lib/catalog.svelte";
   import { flow, getRecommended } from "../lib/flows.svelte";
   import { t } from "../lib/i18n";
-  import { navigate } from "../lib/router.svelte";
+  import { navigate, router } from "../lib/router.svelte";
 
   let { active }: { active: boolean } = $props();
 
@@ -24,7 +24,9 @@
     if (!hero) return;
     const id = hero.id;
     const outcome = await getRecommended(id);
-    if (outcome === "none") {
+    // Only open the film if the family is still looking at Home.
+    const onHome = router.route.tab === "home" && router.route.movie == null;
+    if (outcome === "none" && onHome) {
       // Nothing good to recommend: open the film with its version list.
       navigate(`#/movie/${id}`);
       navigate(`#/movie/${id}/more`);

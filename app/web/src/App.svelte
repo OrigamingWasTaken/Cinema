@@ -2,6 +2,7 @@
   import TabBar from "./components/TabBar.svelte";
   import { catalog } from "./lib/catalog.svelte";
   import { router, TABS, type Tab } from "./lib/router.svelte";
+  import { ui } from "./lib/ui.svelte";
   import Downloads from "./screens/Downloads.svelte";
   import Home from "./screens/Home.svelte";
   import Library from "./screens/Library.svelte";
@@ -20,7 +21,7 @@
   catalog.start();
 </script>
 
-<main class:has-movie={router.route.movie != null}>
+<main class:has-movie={router.route.movie != null} inert={ui.sheetOpen}>
   {#each TABS as tab (tab)}
     {#if visited[tab]}
       {@const Screen = SCREENS[tab]}

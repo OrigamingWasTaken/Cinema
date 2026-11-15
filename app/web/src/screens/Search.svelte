@@ -159,7 +159,7 @@
     align-items: center;
     gap: 10px;
     height: 48px;
-    padding: 0 6px 0 14px;
+    padding: 0 2px 0 14px;
     border-radius: 14px;
     background: var(--aisle);
     color: var(--usher);
@@ -180,7 +180,7 @@
   }
   input::placeholder { color: var(--usher); opacity: 1; }
   input::-webkit-search-cancel-button { display: none; }
-  .trail { width: 40px; height: 40px; display: grid; place-items: center; flex: none; }
+  .trail { width: 44px; height: 44px; display: grid; place-items: center; flex: none; }
   .clear { border: 0; background: none; padding: 0; color: var(--usher); cursor: pointer; border-radius: 50%; }
   .clear:active { background: rgb(255 255 255 / 0.08); }
   .section-title { margin-top: 10px; }

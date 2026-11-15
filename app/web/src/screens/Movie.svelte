@@ -91,6 +91,23 @@
   const art = (m: MovieInfo) => (m.backdrop_path ? backdropUrl(m.backdrop_path) : null);
 </script>
 
+{#snippet removeControl()}
+  {#if confirming}
+    <div class="confirm">
+      <p>{t("remove_confirm")}</p>
+      <div class="confirm-buttons">
+        <button class="btn btn--secondary" type="button" disabled={removing} onclick={() => (confirming = false)}>{t("cancel")}</button>
+        <button class="btn btn--danger" type="button" disabled={removing} onclick={remove}>
+          {#if removing}<Spinner />{/if}{t("remove")}
+        </button>
+      </div>
+      {#if removeFailed}<p class="message">{t("error")}</p>{/if}
+    </div>
+  {:else}
+    <button class="btn btn--quiet remove" type="button" onclick={() => (confirming = true)}>{t("remove")}</button>
+  {/if}
+{/snippet}
+
 <article class="movie" in:fade={{ duration: ms(200) }}>
   <button class="back" type="button" aria-label={t("back")} onclick={() => goBack(tabHome)}>
     <Icon name="back" size={22} stroke={2.4} />
@@ -126,22 +143,7 @@
         {#if item}
           <div class="status-card status-card--{item.state}">
             <Status {item} />
-            {#if item.state !== "failed"}
-              {#if confirming}
-                <div class="confirm">
-                  <p>{t("remove_confirm")}</p>
-                  <div class="confirm-buttons">
-                    <button class="btn btn--secondary" type="button" disabled={removing} onclick={() => (confirming = false)}>{t("cancel")}</button>
-                    <button class="btn btn--danger" type="button" disabled={removing} onclick={remove}>
-                      {#if removing}<Spinner />{/if}{t("remove")}
-                    </button>
-                  </div>
-                  {#if removeFailed}<p class="message">{t("error")}</p>{/if}
-                </div>
-              {:else}
-                <button class="btn btn--quiet remove" type="button" onclick={() => (confirming = true)}>{t("remove")}</button>
-              {/if}
-            {/if}
+            {#if item.state !== "failed"}{@render removeControl()}{/if}
           </div>
         {/if}
 
@@ -154,6 +156,9 @@
           </button>
           {#if current.message}
             <p class="message message--{current.message}">{t(current.message)}</p>
+          {/if}
+          {#if item?.state === "failed"}
+            <div class="failed-remove">{@render removeControl()}</div>
           {/if}
         {/if}
       </div>
@@ -274,6 +279,9 @@
   .status-card--failed { background: rgb(242 154 136 / 0.07); box-shadow: inset 0 0 0 1px rgb(242 154 136 / 0.22); }
   .remove { align-self: flex-start; margin: 4px 0 -8px -8px; padding: 0 8px; }
   .confirm { margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .failed-remove { display: flex; flex-direction: column; }
+  .failed-remove .remove { align-self: center; margin: 0; }
+  .failed-remove .confirm { margin-top: 4px; }
   .confirm p { margin: 0 0 12px; font-weight: 550; }
   .confirm-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .confirm-buttons .btn { min-height: 48px; font-size: 16px; }
