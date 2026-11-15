@@ -251,6 +251,22 @@ async def test_page_labels_hidden_when_season_counts_differ(env):
 
 
 @pytest.mark.anyio
+async def test_page_year_from_sonarr_when_tmdb_lacks_the_season(env):
+    # Same count, different numbers: TMDB has no season 2, so no label, but the year
+    # still comes from Sonarr's air dates.
+    with_seasons(env, [(1, "Origins", 2008), (3, "Later", 2030)])
+    env.fake.series[5] = series_dict(monitored=True)
+    env.fake.episodes = [ep_dict(101, 1), ep_dict(201, 2)]
+    s1, s2 = (await env.page(TMDB))["seasons"]
+    assert (s1["label"], s1["year"]) == ("Origins", 2008)
+    assert (s2["label"], s2["year"]) == (None, int(PAST[:4]))
+    # A TMDB season without a year falls back the same way.
+    with_seasons(env, [(1, "Origins", None), (2, "Steel", 2026)])
+    s1, _ = (await env.page(TMDB))["seasons"]
+    assert (s1["label"], s1["year"]) == ("Origins", int(PAST[:4]))
+
+
+@pytest.mark.anyio
 async def test_page_unavailable_without_tvdb(env):
     env.tmdb_fake.shows[TMDB] = info(tvdb=None)
     page = await env.page(TMDB)

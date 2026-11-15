@@ -100,15 +100,17 @@ def _tmdb_labels(info: ShowInfo, count: int) -> dict[int, tuple[str | None, int 
 
 def _naming(info: ShowInfo, names: dict, number: int,
             episodes: list[SonarrEpisode] | None = None) -> dict:
-    """label, year and next_air_date of one season (see _tmdb_labels for the guard)."""
+    """label, year and next_air_date of one season (see _tmdb_labels for the guard). A year
+    TMDB lacks comes from Sonarr's earliest air date."""
+    dates = [e.air_date_utc[:4] for e in episodes or [] if e.air_date_utc]
+    first = min(dates) if dates else None
+    sonarr_year = int(first) if first and first.isdigit() else None
     if names:
         label, year = names.get(number, (None, None))
         nxt = info.next_episode
-        return {"label": label, "year": year,
+        return {"label": label, "year": year if year is not None else sonarr_year,
                 "next_air_date": nxt[2] if nxt and nxt[0] == number else None}
-    dates = [e.air_date_utc[:4] for e in episodes or [] if e.air_date_utc]
-    year = min(dates) if dates and min(dates).isdigit() else None
-    return {"label": None, "year": int(year) if year else None, "next_air_date": None}
+    return {"label": None, "year": sonarr_year, "next_air_date": None}
 
 
 def _has_files(s: SonarrSeries) -> bool:

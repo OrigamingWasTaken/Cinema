@@ -291,6 +291,12 @@ const days = new Intl.DateTimeFormat(lang === "fr" ? "fr-FR" : "en-US", {
 });
 
 /** A "YYYY-MM-DD" air date as weekday, day and month ("Fri 20 Nov", "ven. 20 nov."); null if unreadable. */
+/** shortDay for a next air date, or null once that day is over (UTC): TMDB can lag. */
+export function nextAirDay(day: string | null, now: Date = new Date()): string | null {
+  if (!day || day < now.toISOString().slice(0, 10)) return null;
+  return shortDay(day);
+}
+
 export function shortDay(day: string | null): string | null {
   if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
   const at = new Date(`${day}T00:00:00Z`);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { slide } from "svelte/transition";
   import type { EpisodeView, SeasonView } from "../lib/api";
-  import { shortDate, shortDay, t, type StringKey } from "../lib/i18n";
+  import { nextAirDay, shortDate, t, type StringKey } from "../lib/i18n";
   import { ms } from "../lib/motion";
   import { playHref } from "../lib/router.svelte";
   import Icon from "./Icon.svelte";
@@ -38,7 +38,7 @@
   const listId = $derived(`season-${season.number}-episodes`);
 
   const sub = $derived([season.label, season.year].filter(Boolean).join(" · "));
-  const nextDay = $derived(shortDay(season.next_air_date));
+  const nextDay = $derived(nextAirDay(season.next_air_date));
 
   const stateLine = $derived.by((): string | null => {
     switch (season.state) {
