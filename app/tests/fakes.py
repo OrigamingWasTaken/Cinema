@@ -179,3 +179,100 @@ class FakeRqbit:
         headers["Content-Length"] = str(len(body))
         return httpx.Response(206, headers=headers,
                               stream=_TrackedStream(body, self, key))
+
+
+class FakeSonarr:
+    """In-memory Sonarr v3 API (the endpoints cinema.sonarr uses).
+
+    lookup: tvdb id -> lookup-result series dict (no "id")
+    series: id -> series dict; episodes: list of episode dicts (seriesId, ...)
+    files: list of episodefile dicts (seriesId, ...); queue: list of queue records
+    profiles: list of {"id", "name"}; calls: every write as (method, path, json)
+    """
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key  # when set, requests without it get 401
+        self.lookup: dict[int, dict] = {}
+        self.series: dict[int, dict] = {}
+        self.episodes: list[dict] = []
+        self.files: list[dict] = []
+        self.queue: list[dict] = []
+        self.profiles: list[dict] = [{"id": 1, "name": "Cinema"}]
+        self.calls: list[tuple[str, str, object]] = []
+        self.requests: list[httpx.Request] = []
+        self.fail_status: int | None = None
+        self._next_id = 100
+        self.transport = httpx.MockTransport(self._handle)
+
+    @staticmethod
+    def _json(status: int, body) -> httpx.Response:
+        return httpx.Response(status, content=json.dumps(body).encode(),
+                              headers={"content-type": "application/json"})
+
+    def _record(self, request: httpx.Request):
+        body = json.loads(request.content) if request.content else None
+        self.calls.append((request.method, request.url.path, body))
+        return body
+
+    async def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.fail_status is not None:
+            return httpx.Response(self.fail_status, text="boom")
+        if self.api_key is not None and request.headers.get("x-api-key") != self.api_key:
+            return httpx.Response(401, text="unauthorized")
+        path, method = request.url.path, request.method
+        params = dict(request.url.params)
+
+        if method == "GET" and path == "/api/v3/series/lookup":
+            term = params.get("term", "")
+            found = self.lookup.get(int(term[5:])) if term.startswith("tvdb:") else None
+            return self._json(200, [found] if found else [])
+        if path == "/api/v3/series":
+            if method == "GET":
+                return self._json(200, list(self.series.values()))
+            if method == "POST":
+                body = self._record(request)
+                self._next_id += 1
+                added = {**body, "id": self._next_id}
+                self.series[added["id"]] = added
+                return self._json(201, added)
+        m = re.fullmatch(r"/api/v3/series/(\d+)", path)
+        if m and method == "PUT":
+            body = self._record(request)
+            self.series[int(m.group(1))] = body
+            return self._json(202, body)
+        if method == "GET" and path == "/api/v3/episode":
+            sid = int(params["seriesId"])
+            return self._json(200, [e for e in self.episodes if e.get("seriesId") == sid])
+        if method == "PUT" and path == "/api/v3/episode/monitor":
+            body = self._record(request)
+            for e in self.episodes:
+                if e["id"] in body["episodeIds"]:
+                    e["monitored"] = body["monitored"]
+            return self._json(202, [e for e in self.episodes if e["id"] in body["episodeIds"]])
+        if method == "POST" and path == "/api/v3/command":
+            body = self._record(request)
+            return self._json(201, {"id": 1, "name": body["name"], "status": "queued"})
+        if method == "GET" and path == "/api/v3/episodefile":
+            sid = int(params["seriesId"])
+            return self._json(200, [f for f in self.files if f.get("seriesId") == sid])
+        if method == "DELETE" and path == "/api/v3/episodefile/bulk":
+            body = self._record(request)
+            gone = set(body["episodeFileIds"])
+            self.files = [f for f in self.files if f["id"] not in gone]
+            for e in self.episodes:
+                if e.get("episodeFileId") in gone:
+                    e["hasFile"], e["episodeFileId"] = False, 0
+            return self._json(200, {})
+        if method == "GET" and path == "/api/v3/queue":
+            return self._json(200, {"page": 1, "pageSize": int(params.get("pageSize", 10)),
+                                    "totalRecords": len(self.queue),
+                                    "records": self.queue})
+        m = re.fullmatch(r"/api/v3/queue/(\d+)", path)
+        if m and method == "DELETE":
+            self.calls.append((method, path, params))
+            self.queue = [r for r in self.queue if r["id"] != int(m.group(1))]
+            return httpx.Response(200)
+        if method == "GET" and path == "/api/v3/qualityprofile":
+            return self._json(200, self.profiles)
+        return httpx.Response(404, text="not found")
