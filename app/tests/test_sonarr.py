@@ -126,6 +126,29 @@ async def test_remove_from_queue_blocklists():
 
 
 @pytest.mark.anyio
+async def test_remove_from_queue_removes_the_whole_download_and_404_is_gone():
+    fake = FakeSonarr()
+    fake.queue = [record(3, "AB", 1), record(4, "AB", 2), record(5, "CD", 3)]
+    client = make(fake)
+    await client.remove_from_queue(3, blocklist=False)
+    assert [r["id"] for r in fake.queue] == [5]
+    await client.remove_from_queue(4, blocklist=False)  # went with 3: already gone
+    assert [c[1] for c in fake.calls] == ["/api/v3/queue/3", "/api/v3/queue/4"]
+    fake.fail_status = 500
+    with pytest.raises(SonarrError):
+        await client.remove_from_queue(5, blocklist=False)
+
+
+@pytest.mark.anyio
+async def test_delete_episode_files_rejects_duplicate_ids_like_sonarr():
+    fake = FakeSonarr()
+    fake.files = [{"id": 9, "seriesId": 5}]
+    with pytest.raises(SonarrError) as e:
+        await make(fake).delete_episode_files([9, 9])
+    assert e.value.status == 500 and fake.files != []
+
+
+@pytest.mark.anyio
 async def test_api_key_callable_read_per_request():
     fake = FakeSonarr(api_key="late")
     keys = iter(["", "late"])

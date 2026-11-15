@@ -336,6 +336,9 @@ class FakeSonarr:
         if method == "DELETE" and path == "/api/v3/episodefile/bulk":
             body = self._record(request)
             gone = set(body["episodeFileIds"])
+            if len(gone) != len(body["episodeFileIds"]):
+                # Sonarr loads the files by id and fails when the row count differs.
+                return httpx.Response(500, text="Expected query to return N rows")
             self.files = [f for f in self.files if f["id"] not in gone]
             for e in self.episodes:
                 if e.get("episodeFileId") in gone:
@@ -347,8 +350,12 @@ class FakeSonarr:
                                     "records": self.queue})
         m = re.fullmatch(r"/api/v3/queue/(\d+)", path)
         if m and method == "DELETE":
+            # One record per episode, but removing one removes the whole download.
             self.calls.append((method, path, params))
-            self.queue = [r for r in self.queue if r["id"] != int(m.group(1))]
+            found = next((r for r in self.queue if r["id"] == int(m.group(1))), None)
+            if found is None:
+                return httpx.Response(404, text="not found")
+            self.queue = [r for r in self.queue if r["downloadId"] != found["downloadId"]]
             return httpx.Response(200)
         if method == "GET" and path == "/api/v3/qualityprofile":
             return self._json(200, self.profiles)

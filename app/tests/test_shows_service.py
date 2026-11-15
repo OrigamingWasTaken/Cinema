@@ -390,6 +390,43 @@ async def test_remove_season_deletes_files_unmonitors_and_dequeues(env):
 
 
 @pytest.mark.anyio
+async def test_remove_season_with_double_episode_file_and_season_pack(env):
+    env.fake.series[5] = series_dict(monitored=True)
+    env.fake.episodes = [ep_dict(101, 1, file_id=9), ep_dict(102, 1, file_id=9),  # S01E01E02
+                         ep_dict(103, 1, file_id=10), ep_dict(104, 1), ep_dict(105, 1)]
+    env.fake.files = [{"id": 9, "seriesId": 5}, {"id": 10, "seriesId": 5}]
+
+    def rec(id, episode_id, download_id):
+        return {"id": id, "downloadId": download_id, "episodeId": episode_id, "seriesId": 5,
+                "episode": {"seasonNumber": 1, "episodeNumber": episode_id % 100}}
+    # Sonarr v3 lists a season pack once per episode, all with the pack's downloadId.
+    env.fake.queue = [rec(1, 104, "AB"), rec(2, 105, "AB"), rec(3, 104, "CD")]
+    await env.remove_season(TMDB, 1)
+    deletes = [(p, b) for m, p, b in env.fake.calls if m == "DELETE"]
+    assert deletes[0] == ("/api/v3/episodefile/bulk", {"episodeFileIds": [9, 10]})
+    assert [p for p, _ in deletes[1:]] == ["/api/v3/queue/1", "/api/v3/queue/3"]
+    assert env.fake.files == [] and env.fake.queue == []
+
+
+@pytest.mark.anyio
+async def test_remove_season_tolerates_a_download_already_gone(env):
+    env.fake.series[5] = series_dict(monitored=True)
+    env.fake.episodes = [ep_dict(101, 1)]
+    env.fake.queue = [{"id": 1, "downloadId": "AB", "episodeId": 101, "seriesId": 5,
+                       "episode": {"seasonNumber": 1, "episodeNumber": 1}}]
+    handle = env.fake._handle
+
+    async def racing(request):  # Sonarr imports it between our read and the delete
+        if request.method == "DELETE" and request.url.path == "/api/v3/queue/1":
+            env.fake.queue = []
+        return await handle(request)
+    env.sonarr = SonarrClient("http://sonarr:8989", "k",
+                              httpx.AsyncClient(transport=httpx.MockTransport(racing)))
+    page = await env.remove_season(TMDB, 1)
+    assert page["seasons"][0]["monitored"] is False
+
+
+@pytest.mark.anyio
 async def test_home_yours_and_library(env):
     for i in (1, 2, 3, 4, 5):
         env.tmdb_fake.shows[i] = info(i, tvdb=i)

@@ -222,10 +222,16 @@ class SonarrClient:
         return [i for i in items if i is not None]
 
     async def remove_from_queue(self, queue_id: int, *, blocklist: bool) -> None:
-        await self._request("DELETE", f"/api/v3/queue/{queue_id}",
-                            params={"removeFromClient": "true",
-                                    "blocklist": "true" if blocklist else "false",
-                                    "skipRedownload": "false"})
+        """Remove a queue record's whole download. A 404 means it is already gone
+        (imported, or removed with another record of the same download)."""
+        try:
+            await self._request("DELETE", f"/api/v3/queue/{queue_id}",
+                                params={"removeFromClient": "true",
+                                        "blocklist": "true" if blocklist else "false",
+                                        "skipRedownload": "false"})
+        except SonarrError as e:
+            if e.status != 404:
+                raise
 
     async def quality_profile_id(self, name: str) -> int:
         for p in await self._request("GET", "/api/v3/qualityprofile"):

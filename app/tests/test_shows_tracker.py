@@ -605,3 +605,18 @@ async def test_pausing_finished_downloads_is_isolated_per_torrent(env):
     assert env.rqbit.torrents[ok]["paused"]
     assert not env.rqbit.torrents[broken_stats]["paused"]
     assert not env.rqbit.torrents[broken_pause]["paused"]
+
+
+@pytest.mark.anyio
+async def test_stall_blocklist_of_a_download_already_gone_counts_as_done(env):
+    env.tracker.watch_started = 0.0
+    env.sonarr.episodes = [ep_rec(101, 1, 1)]
+    env.sonarr.queue = [queue_rec(1, 101, 1, 1)]
+    env.rqbit.add_torrent(HASH, [(["S01E01.mkv"], 500 * MIB)], file_progress=[0], live_peers=0)
+    await env.tracker.refresh()
+    use_sonarr(env, failing(env.sonarr, "DELETE", "/api/v3/queue/1", status=404))
+    env.clock[0] = 1601.0
+    await env.tracker.refresh()
+    assert env.tracker.ok
+    assert [r.status for r in env.store.show_downloads()] == ["failed"]
+    assert [(e.episode, e.state) for e in env.tracker.failed] == [(1, "failed")]

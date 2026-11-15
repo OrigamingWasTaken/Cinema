@@ -254,12 +254,17 @@ class ShowsService:
                 eps = [e for e in await self.sonarr.episodes(series.id) if e.season == season]
                 if eps:
                     await self.sonarr.monitor_episodes([e.id for e in eps], False)
-                files = [e.episode_file_id for e in eps if e.episode_file_id]
+                # A multi-episode file belongs to each of its episodes: list it once.
+                files = list(dict.fromkeys(e.episode_file_id for e in eps if e.episode_file_id))
                 if files:
                     await self.sonarr.delete_episode_files(files)
+                # The queue has a record per episode; removing one removes its download.
+                downloads: dict[str, int] = {}
                 for q in await self.sonarr.queue():
                     if q.series_id == series.id and q.season == season:
-                        await self.sonarr.remove_from_queue(q.id, blocklist=False)
+                        downloads.setdefault(q.download_id, q.id)
+                for queue_id in downloads.values():
+                    await self.sonarr.remove_from_queue(queue_id, blocklist=False)
                 self.store.clear_season_requested(tmdb_id, season)
                 self.tracker.invalidate(series.id)
         return await self.page(tmdb_id)
