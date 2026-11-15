@@ -87,12 +87,12 @@ def test_propfind_root_lists_movies_dir(env):
     c = env.client()
     r, resp = propfind(c, "/dav/")
     assert r.headers["content-type"] == "application/xml; charset=utf-8"
-    assert set(resp) == {"/dav/", "/dav/Movies/"}
+    assert set(resp) == {"/dav/", "/dav/Movies/", "/dav/Shows/"}
     assert resp["/dav/Movies/"].find("D:propstat/D:prop/D:resourcetype/D:collection", NS) is not None
     _, depth0 = propfind(c, "/dav/", depth="0")
     assert set(depth0) == {"/dav/"}
     _, no_slash = propfind(c, "/dav")
-    assert set(no_slash) == {"/dav/", "/dav/Movies/"}
+    assert set(no_slash) == {"/dav/", "/dav/Movies/", "/dav/Shows/"}
 
 
 def test_propfind_movies_hides_not_ready(env):

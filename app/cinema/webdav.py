@@ -10,6 +10,7 @@ import re
 import secrets
 import unicodedata
 import xml.etree.ElementTree as ET
+from collections import Counter
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, Response, StreamingResponse
 
 from cinema.rqbit import VIDEO_EXTENSIONS, RqbitClient
-from cinema.store import Movie, Store, library_name
+from cinema.store import Store, library_name
 
 if TYPE_CHECKING:  # cinema.shows imports this module
     from cinema.shows import ShowsTracker
@@ -54,8 +55,8 @@ class _File:
     filename: str
     size: int
     mtime: float
-    path: Path
-    movie: Movie | None  # set only while the movie is still downloading
+    path: Path | None
+    stream: tuple[int, int] | None  # (torrent id, file index): set only while downloading
 
     @property
     def content_type(self) -> str:
@@ -107,8 +108,8 @@ def _multistatus(responses: list[ET.Element]) -> Response:
     return Response(body, status_code=207, media_type="application/xml; charset=utf-8")
 
 
-def _file_response(f: _File) -> ET.Element:
-    return _response(_href("Movies", f.dirname, f.filename, collection=False),
+def _file_response(f: _File, *parents: str) -> ET.Element:
+    return _response(_href(*parents, f.filename, collection=False),
                      name=f.filename, collection=False, size=f.size,
                      ctype=f.content_type, mtime=f.mtime)
 
@@ -126,7 +127,8 @@ def _scan_library(store: Store, legacy_dir: Path) -> dict[str, _File]:
             continue
         path = Path(m.file_path)
         library[dirname] = _File(dirname, dirname + path.suffix, m.size, m.added_at, path,
-                                 m if m.status == "downloading" else None)
+                                 (m.torrent_id, m.file_index) if m.status == "downloading"
+                                 else None)
     try:
         legacy_dirs = sorted(p for p in legacy_dir.iterdir() if p.is_dir())
     except OSError:
@@ -144,6 +146,38 @@ def _scan_library(store: Store, legacy_dir: Path) -> dict[str, _File]:
             p, st = max(videos, key=lambda v: v[1].st_size)
             library[dirname] = _File(dirname, _nfc(p.name), st.st_size, st.st_mtime, p, None)
     return library
+
+
+# show dirname -> season dir -> filename -> file
+_ShowsTree = dict[str, dict[str, dict[str, _File]]]
+
+
+def _shows_tree(tracker: "ShowsTracker") -> _ShowsTree:
+    """The virtual Shows layout. On a name clash the first entry (tracker order) wins."""
+    tree: _ShowsTree = {}
+    for e in tracker.listed():
+        if e.path is not None:
+            stream = None
+        elif e.torrent_id is not None and e.file_index is not None:
+            stream = (e.torrent_id, e.file_index)
+        else:
+            continue  # nothing to serve it from
+        show, season, filename = _nfc(e.dirname), _nfc(e.season_dir), _nfc(e.filename)
+        files = tree.setdefault(show, {}).setdefault(season, {})
+        if filename not in files:
+            files[filename] = _File(show, filename, e.size, e.mtime, e.path, stream)
+    return tree
+
+
+def _latest(node: dict) -> float:
+    return max(v.mtime if isinstance(v, _File) else _latest(v) for v in node.values())
+
+
+def _release(streams: Counter[int], torrent_id: int) -> None:
+    if streams[torrent_id] <= 1:
+        streams.pop(torrent_id, None)
+    else:
+        streams[torrent_id] -= 1
 
 
 class _ProxyResponse(StreamingResponse):
@@ -219,18 +253,42 @@ def _authorized(request: Request, auth: tuple[str, str]) -> bool:
 def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
                      legacy_dir: Path, auth: tuple[str, str] | None,
                      tracker: "ShowsTracker | None" = None) -> APIRouter:
-    # tracker: serves /dav/Shows (Task 7); not used yet.
+    """WebDAV share: Movies always, Shows only when a shows tracker is given."""
     router = APIRouter()
 
+    def shows_propfind(segments: list[str], depth_one: bool) -> Response:
+        node: dict | _File = _shows_tree(tracker)
+        for s in segments[1:]:
+            if not isinstance(node, dict) or s not in node:
+                return Response(status_code=404)
+            node = node[s]
+        if isinstance(node, _File):
+            return _multistatus([_file_response(node, *segments[:-1])])
+        out = [_response(_href(*segments, collection=True), name=segments[-1], collection=True,
+                         mtime=_latest(node) if len(segments) > 1 else None)]
+        if depth_one:
+            for name, child in node.items():
+                if isinstance(child, _File):
+                    out.append(_file_response(child, *segments))
+                else:
+                    out.append(_response(_href(*segments, name, collection=True), name=name,
+                                         collection=True, mtime=_latest(child)))
+        return _multistatus(out)
+
     async def propfind(request: Request, segments: list[str]) -> Response:
-        library = await run_in_threadpool(_scan_library, store, legacy_dir)
         depth_one = request.headers.get("depth", "infinity").strip() != "0"
+        if segments and segments[0] == "Shows" and tracker is not None:
+            return shows_propfind(segments, depth_one)
+        library = await run_in_threadpool(_scan_library, store, legacy_dir)
         out: list[ET.Element] = []
         if not segments:
             out.append(_response(_href(collection=True), name="", collection=True))
             if depth_one:
                 out.append(_response(_href("Movies", collection=True), name="Movies",
                                      collection=True))
+                if tracker is not None:
+                    out.append(_response(_href("Shows", collection=True), name="Shows",
+                                         collection=True))
         elif segments == ["Movies"]:
             out.append(_response(_href("Movies", collection=True), name="Movies",
                                  collection=True))
@@ -243,17 +301,23 @@ def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
             out.append(_response(_href("Movies", f.dirname, collection=True), name=f.dirname,
                                  collection=True, mtime=f.mtime))
             if depth_one:
-                out.append(_file_response(f))
+                out.append(_file_response(f, "Movies", f.dirname))
         elif (len(segments) == 3 and segments[0] == "Movies"
               and segments[1] in library and library[segments[1]].filename == segments[2]):
-            out.append(_file_response(library[segments[1]]))
+            f = library[segments[1]]
+            out.append(_file_response(f, "Movies", f.dirname))
         else:
             return Response(status_code=404)
         return _multistatus(out)
 
-    async def serve_file(request: Request, f: _File) -> Response:
-        if f.movie is None:
-            if not f.path.is_file():
+    async def serve_file(request: Request, f: _File,
+                         streams: Counter[int] | None = None) -> Response:
+        """Serve f from disk, or proxy it from rqbit while it downloads.
+
+        streams, if given, counts the open rqbit streams per torrent id.
+        """
+        if f.stream is None:
+            if f.path is None or not f.path.is_file():
                 return Response(status_code=404)
             return FileResponse(f.path, media_type=f.content_type)
         base = {"Accept-Ranges": "bytes", "Content-Type": f.content_type}
@@ -271,7 +335,8 @@ def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
                                     headers={**base, "Content-Range": f"bytes */{f.size}"})
                 rng = f"bytes={max(0, f.size - n)}-{f.size - 1}"
             upstream_headers["Range"] = rng
-        url = rqbit.stream_url(f.movie.torrent_id, f.movie.file_index)
+        torrent_id, file_index = f.stream
+        url = rqbit.stream_url(torrent_id, file_index)
         try:
             upstream = await _open_upstream(request, http, url, upstream_headers)
         except httpx.HTTPError:
@@ -279,6 +344,9 @@ def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
         if upstream is None:
             return Response(status_code=CLIENT_GONE)  # nobody is listening any more
         stack = AsyncExitStack()
+        if streams is not None:
+            streams[torrent_id] += 1
+            stack.callback(_release, streams, torrent_id)  # runs after upstream.aclose
         stack.push_async_callback(upstream.aclose)
         headers = dict(base)
         for name in ("Content-Range", "Content-Length", "Accept-Ranges"):
@@ -308,6 +376,10 @@ def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
             f = library.get(segments[1])
             if f is not None and f.filename == segments[2]:
                 return await serve_file(request, f)
+        if len(segments) == 4 and segments[0] == "Shows" and tracker is not None:
+            f = _shows_tree(tracker).get(segments[1], {}).get(segments[2], {}).get(segments[3])
+            if f is not None:
+                return await serve_file(request, f, tracker.open_streams)
         return Response(status_code=404)
 
     router.add_route("/dav", handler, methods=METHODS)
