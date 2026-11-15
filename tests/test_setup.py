@@ -81,7 +81,7 @@ class TestDirectorySetup(unittest.TestCase):
             from setup import DirectorySetup
             DirectorySetup(data_path=data_dir, config_path=config_dir).create()
             self.assertTrue(os.path.isdir(os.path.join(data_dir, "movies")))
-            for sub in ("prowlarr", "rqbit/db", "rqbit/cache", "cinema"):
+            for sub in ("prowlarr", "rqbit/db", "rqbit/cache", "cinema", "sonarr"):
                 self.assertTrue(os.path.isdir(os.path.join(config_dir, sub)), sub)
             self.assertFalse(os.path.exists(os.path.join(config_dir, "radarr")))
 
@@ -346,8 +346,9 @@ class TestConfigure(unittest.TestCase):
 class TestHelpers(unittest.TestCase):
     def test_constants(self):
         import setup
-        self.assertEqual(setup.DATA_DIRS, ["movies"])
-        self.assertEqual(setup.CONFIG_SERVICES, ["prowlarr", "rqbit/db", "rqbit/cache", "cinema"])
+        self.assertEqual(setup.DATA_DIRS, ["movies", "downloads", "shows"])
+        self.assertEqual(setup.CONFIG_SERVICES,
+                         ["prowlarr", "rqbit/db", "rqbit/cache", "cinema", "sonarr"])
         self.assertEqual(setup.StackLauncher.HEALTH_PORTS, {"prowlarr": 9696, "cinema": 8888})
 
     def test_docker_bin_falls_back(self):
@@ -378,6 +379,371 @@ class TestCompose(unittest.TestCase):
         path = os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")
         with open(path) as f:
             self.assertIn("- PROWLARR_API_KEY=${PROWLARR_API_KEY:-}", f.read())
+
+
+class TestTvSetup(unittest.TestCase):
+    def test_data_dirs_include_downloads_and_shows(self):
+        import setup
+        with tempfile.TemporaryDirectory() as data_dir:
+            setup.DirectorySetup(data_dir, os.path.join(data_dir, "config")).create()
+            for d in ("movies", "downloads", "shows"):
+                self.assertTrue(os.path.isdir(os.path.join(data_dir, d)), d)
+
+    def test_plan_tv_indexers_adds_missing_only(self):
+        from setup import plan_tv_indexers, TV_INDEXERS
+        self.assertEqual(TV_INDEXERS, ["showRSS", "LimeTorrents", "TorrentDownload", "Nyaa.si"])
+        self.assertEqual(plan_tv_indexers([]), TV_INDEXERS)
+        self.assertEqual(plan_tv_indexers([{"name": "YTS"}, {"name": "showRSS"}]),
+                         ["LimeTorrents", "TorrentDownload", "Nyaa.si"])
+        self.assertEqual(plan_tv_indexers([{"name": n} for n in TV_INDEXERS]), [])
+
+    def test_chown_tree_recursive_skips_symlinks_and_correct_owners(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "a", "b"))
+            open(os.path.join(d, "a", "f"), "w").close()
+            os.symlink(d, os.path.join(d, "a", "link"))
+            me = os.lstat(d)
+            with mock.patch("os.lchown") as lchown:
+                setup.chown_tree(d, me.st_uid + 1, me.st_gid)
+                changed = {c[0][0] for c in lchown.call_args_list}
+                self.assertEqual(changed, {d, os.path.join(d, "a"), os.path.join(d, "a", "b"),
+                                           os.path.join(d, "a", "f")})
+                lchown.reset_mock()
+                setup.chown_tree(d, str(me.st_uid), str(me.st_gid))  # already correct
+                lchown.assert_not_called()
+
+    def test_chown_tree_missing_path_is_noop(self):
+        import setup
+        setup.chown_tree("/nonexistent-cinema-path", 1, 1)
+
+    def test_verify_hardlinks_inode_compare(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "downloads"))
+            os.makedirs(os.path.join(d, "shows"))
+            src = os.path.join(d, "downloads", ".cinema-link-test")
+            dst = os.path.join(d, "shows", ".cinema-link-test")
+
+            def runner(user):
+                def fake(cmd, **kw):
+                    if "inspect" in cmd:
+                        return subprocess.CompletedProcess(cmd, 0, stdout=user + "\n", stderr="")
+                    self.assertIn("1024:100", cmd)
+                    self.assertEqual(cmd[-3:], ["ln", "/data/downloads/.cinema-link-test",
+                                                "/data/shows/.cinema-link-test"])
+                    os.link(src, dst)  # what the container's ln does
+                    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+                return fake
+
+            with mock.patch("os.chown"), mock.patch("setup.docker_bin", return_value="/bin/docker"):
+                with mock.patch("subprocess.run", side_effect=runner("1024:100")):
+                    self.assertTrue(setup.verify_hardlinks(d, "1024", "100"))
+                self.assertFalse(os.path.exists(src))
+                self.assertFalse(os.path.exists(dst))
+                with mock.patch("subprocess.run", side_effect=runner("")):
+                    self.assertFalse(setup.verify_hardlinks(d, "1024", "100"))  # wrong rqbit user
+                self.assertFalse(os.path.exists(src))
+                self.assertFalse(os.path.exists(dst))
+
+    def test_verify_hardlinks_different_inodes_fails_and_cleans_up(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "downloads"))
+            os.makedirs(os.path.join(d, "shows"))
+            src = os.path.join(d, "downloads", ".cinema-link-test")
+            dst = os.path.join(d, "shows", ".cinema-link-test")
+
+            def fake(cmd, **kw):
+                if "inspect" in cmd:
+                    return subprocess.CompletedProcess(cmd, 0, stdout="1024:100\n", stderr="")
+                shutil_copy(src, dst)  # a copy, not a hardlink
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            import shutil as _sh
+            shutil_copy = _sh.copyfile
+            with mock.patch("os.chown"), mock.patch("subprocess.run", side_effect=fake):
+                self.assertFalse(setup.verify_hardlinks(d, "1024", "100"))
+            self.assertFalse(os.path.exists(src))
+            self.assertFalse(os.path.exists(dst))
+
+    def test_verify_hardlinks_ln_failure_cleans_up(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "downloads"))
+            os.makedirs(os.path.join(d, "shows"))
+
+            def fake(cmd, **kw):
+                return subprocess.CompletedProcess(cmd, 1, stdout="1024:100\n", stderr="denied")
+
+            with mock.patch("os.chown"), mock.patch("subprocess.run", side_effect=fake):
+                self.assertFalse(setup.verify_hardlinks(d, "1024", "100"))
+            self.assertEqual(os.listdir(os.path.join(d, "downloads")), [])
+
+    def test_compose_pins_sonarr_and_rqbit_user(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")
+        with open(path) as f:
+            text = f.read()
+        self.assertIn("image: lscr.io/linuxserver/sonarr:develop-5.0.0.2941-ls209", text)
+        self.assertIn('user: "${PUID}:${PGID}"', text)
+        self.assertIn('command: ["server", "start", "/data/downloads"]', text)
+        self.assertIn("- ${CONFIG_PATH}/sonarr:/sonarr-config:ro", text)
+        self.assertIn("- SONARR_API_KEY=${SONARR_API_KEY:-}", text)
+        self.assertIn("- DOTNET_GCConserveMemory=7", text)
+
+
+def make_sonarr(state=None):
+    import setup
+    cfg = setup.SonarrConfigurator.__new__(setup.SonarrConfigurator)
+    cfg.api_key = "sonarr-secret"
+    cfg.puid, cfg.pgid = "1024", "100"
+    state = state if state is not None else {}
+    state.setdefault("rootfolder", [])
+    state.setdefault("downloadclient", [])
+    state.setdefault("customformat", [])
+    state.setdefault("qualityprofile", [])
+    state.setdefault("mediamanagement", {"id": 1, "copyUsingHardlinks": False})
+    state.setdefault("downloadclientconfig", {"id": 1, "enableCompletedDownloadHandling": False})
+    calls = []
+    qualities = ["HDTV-720p", "HDTV-1080p", "WEBRip-720p", "WEBRip-1080p", "WEBDL-720p",
+                 "WEBDL-1080p", "Bluray-720p", "Bluray-1080p", "DVD", "SDTV"]
+
+    def fake(method, path, body=None):
+        calls.append((method, path, body))
+        if (method, path) == ("GET", "/system/status"):
+            return {}
+        if method == "GET" and path in ("/rootfolder", "/downloadclient", "/customformat",
+                                        "/qualityprofile"):
+            return state[path[1:]]
+        if (method, path) == ("GET", "/config/mediamanagement"):
+            return state["mediamanagement"]
+        if (method, path) == ("PUT", "/config/mediamanagement/1"):
+            state["mediamanagement"] = body
+            return body
+        if (method, path) == ("GET", "/config/downloadclient"):
+            return state["downloadclientconfig"]
+        if (method, path) == ("PUT", "/config/downloadclient/1"):
+            state["downloadclientconfig"] = body
+            return body
+        if (method, path) == ("GET", "/downloadclient/schema"):
+            return [{"implementation": "Transmission", "fields": []},
+                    {"implementation": "RQBit", "configContract": "RQbitSettings",
+                     "protocol": "torrent", "fields": [
+                         {"name": "host", "value": "localhost"}, {"name": "port", "value": 3030},
+                         {"name": "useSsl", "value": False}, {"name": "urlBase", "value": "/"}]}]
+        if (method, path) == ("GET", "/customformat/schema"):
+            return [{"implementation": "ReleaseTitleSpecification", "name": "ReleaseTitle",
+                     "fields": [{"name": "value", "value": ""}]}]
+        if (method, path) == ("GET", "/qualityprofile/schema"):
+            return {"name": "", "items": [{"quality": {"id": i + 1, "name": n}, "items": [],
+                                           "allowed": False} for i, n in enumerate(qualities)],
+                    "formatItems": [{"format": f["id"], "name": f["name"], "score": 0}
+                                    for f in state["customformat"]]}
+        if method == "POST" and path == "/rootfolder":
+            state["rootfolder"].append(body)
+            return body
+        if method == "POST" and path == "/downloadclient":
+            state["downloadclient"].append(body)
+            return body
+        if method == "POST" and path == "/customformat":
+            body = dict(body, id=7)
+            state["customformat"].append(body)
+            return body
+        if method == "POST" and path == "/qualityprofile":
+            state["qualityprofile"].append(body)
+            return body
+        raise AssertionError(f"unexpected {method} {path}")
+
+    cfg._request = fake
+    return cfg, calls, state
+
+
+class TestSonarrConfigurator(unittest.TestCase):
+    def test_reads_api_key_and_url(self):
+        import setup
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "sonarr"))
+            with open(os.path.join(d, "sonarr", "config.xml"), "w") as f:
+                f.write("<Config><ApiKey>sk</ApiKey></Config>")
+            cfg = setup.SonarrConfigurator(d, "1024", "100")
+            self.assertEqual(cfg.api_key, "sk")
+            self.assertEqual(setup.SonarrConfigurator.BASE_URL, "http://localhost:8989")
+
+    def test_sonarr_configure_adds_missing_pieces(self):
+        cfg, calls, state = make_sonarr()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.configure()
+        self.assertEqual(state["rootfolder"], [{"path": "/data/shows"}])
+
+        (client,) = state["downloadclient"]
+        self.assertEqual(client["implementation"], "RQBit")
+        self.assertEqual(client["configContract"], "RQbitSettings")
+        self.assertIs(client["enable"], True)
+        self.assertIs(client["removeCompletedDownloads"], False)
+        self.assertIs(client["removeFailedDownloads"], True)
+        fields = {f["name"]: f["value"] for f in client["fields"]}
+        self.assertEqual((fields["host"], fields["port"], fields["urlBase"], fields["useSsl"]),
+                         ("rqbit", 3030, "/", False))
+
+        self.assertIs(state["mediamanagement"]["copyUsingHardlinks"], True)
+        self.assertIs(state["downloadclientconfig"]["enableCompletedDownloadHandling"], True)
+
+        (cf,) = state["customformat"]
+        self.assertEqual(cf["name"], "French only")
+        specs = cf["specifications"]
+        self.assertEqual(len(specs), 2)
+        self.assertEqual(specs[0]["fields"][0]["value"], r"\b(TRUE)?FRENCH\b|\bVF[FQI]?\b")
+        self.assertIs(specs[0]["negate"], False)
+        self.assertEqual(specs[1]["fields"][0]["value"], r"\bMULTI\b")
+        self.assertIs(specs[1]["negate"], True)
+        for sp in specs:
+            self.assertEqual(sp["implementation"], "ReleaseTitleSpecification")
+            self.assertIs(sp["required"], True)
+
+        profiles = {p["name"]: p for p in state["qualityprofile"]}
+        self.assertEqual(set(profiles), {"Cinema", "Cinema FR"})
+        for p in profiles.values():
+            allowed = {i["quality"]["name"] for i in p["items"] if i["allowed"]}
+            self.assertEqual(allowed, {"HDTV-720p", "HDTV-1080p", "WEBRip-720p", "WEBRip-1080p",
+                                       "WEBDL-720p", "WEBDL-1080p", "Bluray-720p",
+                                       "Bluray-1080p"})
+            self.assertEqual(p["cutoff"], 6)  # WEBDL-1080p
+            self.assertIs(p["upgradeAllowed"], False)
+            self.assertEqual(p["minFormatScore"], 0)
+        self.assertEqual(profiles["Cinema"]["formatItems"][0]["score"], -10000)
+        self.assertEqual(profiles["Cinema"]["formatItems"][0]["format"], 7)
+        self.assertEqual(profiles["Cinema FR"]["formatItems"][0]["score"], 0)
+
+    def test_sonarr_configure_idempotent(self):
+        cfg, calls, state = make_sonarr()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.configure()
+        del calls[:]
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.configure()
+        self.assertEqual([c for c in calls if c[0] in ("POST", "PUT", "DELETE")], [])
+
+    def test_sonarr_quality_groups_cutoff_uses_group_id(self):
+        cfg, calls, state = make_sonarr()
+        real = cfg._request
+
+        def grouped(method, path, body=None):
+            result = real(method, path, body)
+            if (method, path) == ("GET", "/qualityprofile/schema"):
+                items = result["items"]
+                web = [i for i in items if i["quality"]["name"] in ("WEBDL-1080p", "WEBRip-1080p")]
+                rest = [i for i in items if i not in web]
+                rest.append({"quality": None, "id": 1001, "name": "WEB 1080p", "allowed": False,
+                             "items": web})
+                result = dict(result, items=rest)
+            return result
+
+        cfg._request = grouped
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.configure()
+        profile = state["qualityprofile"][0]
+        self.assertEqual(profile["cutoff"], 1001)
+        group = [i for i in profile["items"] if i.get("id") == 1001][0]
+        self.assertIs(group["allowed"], True)
+
+    def test_sonarr_wait_until_ready_retries(self):
+        import setup
+        cfg = setup.SonarrConfigurator.__new__(setup.SonarrConfigurator)
+        attempts = []
+
+        def fake(method, path, body=None):
+            attempts.append(path)
+            if len(attempts) < 3:
+                raise OSError("down")
+
+        cfg._request = fake
+        cfg.wait_until_ready(timeout=5, interval=0)
+        self.assertEqual(len(attempts), 3)
+
+    def test_prowlarr_adds_sonarr_application_once(self):
+        import setup
+        cfg = setup.ProwlarrConfigurator.__new__(setup.ProwlarrConfigurator)
+        cfg.api_key = "k"
+        apps = [{"id": 1, "name": "Other", "implementation": "Lidarr"}]
+        calls = []
+
+        def fake(method, path, body=None):
+            calls.append((method, path, body))
+            if (method, path) == ("GET", "/applications"):
+                return apps
+            if (method, path) == ("GET", "/applications/schema"):
+                return [{"implementation": "Sonarr", "configContract": "SonarrSettings",
+                         "fields": [{"name": n, "value": None} for n in
+                                    ("prowlarrUrl", "baseUrl", "apiKey", "syncCategories")]}]
+            if (method, path) == ("POST", "/applications?forceSave=true"):
+                apps.append(body)
+                return body
+
+        cfg._request = fake
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cfg.add_sonarr_application("sonarr-secret")
+            cfg.add_sonarr_application("sonarr-secret")
+        posts = [c for c in calls if c[0] == "POST"]
+        self.assertEqual(len(posts), 1)
+        body = posts[0][2]
+        self.assertEqual(body["name"], "Sonarr")
+        self.assertEqual(body["implementation"], "Sonarr")
+        fields = {f["name"]: f["value"] for f in body["fields"]}
+        self.assertEqual(fields["prowlarrUrl"], "http://prowlarr:9696")
+        self.assertEqual(fields["baseUrl"], "http://sonarr:8989")
+        self.assertEqual(fields["apiKey"], "sonarr-secret")
+        self.assertEqual(fields["syncCategories"],
+                         [5000, 5010, 5020, 5030, 5040, 5045, 5050, 5070])
+        self.assertNotIn("sonarr-secret", out.getvalue())
+
+    def test_prowlarr_adds_tv_indexers_missing_only(self):
+        import setup
+        cfg = setup.ProwlarrConfigurator.__new__(setup.ProwlarrConfigurator)
+        cfg.api_key = "k"
+        calls = []
+
+        def fake(method, path, body=None):
+            calls.append((method, path, body))
+            if (method, path) == ("GET", "/indexer"):
+                return [{"name": "showRSS"}]
+            if (method, path) == ("GET", "/indexer/schema"):
+                return [{"name": n, "implementation": n} for n in setup.TV_INDEXERS]
+
+        cfg._request = fake
+        with contextlib.redirect_stdout(io.StringIO()):
+            cfg.add_tv_indexers()
+        posted = [c[2]["name"] for c in calls if c[0] == "POST"]
+        self.assertEqual(posted, ["LimeTorrents", "TorrentDownload", "Nyaa.si"])
+
+
+class TestMainOrder(unittest.TestCase):
+    def test_hardlink_failure_exits_nonzero_with_cause_after_stack(self):
+        import setup
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env")
+            write_env(env, {"DATA_PATH": d, "CONFIG_PATH": os.path.join(d, "c")})
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                with mock.patch.object(setup, "chown_tree"), \
+                        mock.patch.object(setup, "migrate_prowlarr_config", return_value=False), \
+                        mock.patch.object(setup, "StackLauncher"), \
+                        mock.patch.object(setup, "ProwlarrConfigurator") as pc, \
+                        mock.patch.object(setup, "SonarrConfigurator") as sc, \
+                        mock.patch.object(setup, "verify_hardlinks", return_value=False), \
+                        mock.patch.object(setup, "detect_ip", return_value="1.2.3.4"), \
+                        mock.patch("time.sleep"), \
+                        contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
+                    setup.main()
+            finally:
+                os.chdir(cwd)
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertIn("fs.protected_hardlinks", out.getvalue())
+        self.assertIn("PUID:PGID", out.getvalue())
+        sc.return_value.configure.assert_called_once()
+        pc.return_value.add_sonarr_application.assert_called_once()
+        pc.return_value.add_tv_indexers.assert_called_once()
 
 
 if __name__ == "__main__":

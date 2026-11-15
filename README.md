@@ -1,12 +1,14 @@
 # Cinema
 
-A home movie setup for a Synology NAS and an Apple TV. Anyone in the family
-opens a web app on their phone, picks a movie, and a couple of minutes later it
-is in Infuse on the TV, playable while it is still downloading.
+A home movie and TV setup for a Synology NAS and an Apple TV. Anyone in the
+family opens a web app on their phone, picks a movie or a show season, and a
+couple of minutes later it is in Infuse on the TV, playable while it is still
+downloading.
 
 ```
 phone web app (cinema :8888)  ->  rqbit downloads  ->  Infuse plays over WebDAV
                  \-> Prowlarr + FlareSolverr find the torrents
+                 \-> Sonarr tracks shows and imports finished episodes
 ```
 
 | Service | Port | Purpose |
@@ -14,6 +16,7 @@ phone web app (cinema :8888)  ->  rqbit downloads  ->  Infuse plays over WebDAV
 | cinema | 8888 | Phone web app, TMDB metadata, WebDAV server at `/dav` |
 | rqbit | 4240 | Torrent client (streams while downloading) |
 | Prowlarr | 9696 | Indexer manager (search) |
+| Sonarr | 8989 | Show manager (seasons, imports); admin only |
 | FlareSolverr | internal | Cloudflare helper for Prowlarr |
 
 ## Prerequisites
@@ -65,6 +68,30 @@ When Prowlarr has none, setup adds The Pirate Bay, YTS and Knaben. A v1
 migration keeps the indexers you already had. 1337x does not work: FlareSolverr
 cannot pass its Cloudflare check.
 
+## Shows
+
+The **Shows** tab in the phone app works like the movies, one season at a time.
+
+- **Get season** asks Sonarr to find and download that season. The episodes
+  show up in Infuse as they download.
+- **Follow** keeps an airing show: new episodes are downloaded as they air.
+- **Remove** takes a requested season off the TV again.
+- In Infuse, shows are in the `Shows` folder of the same Cinema share, next to
+  Movies. A path stays the same before and after import.
+
+Show indexers are showRSS, LimeTorrents, TorrentDownload and Nyaa.si (added by
+setup). EZTV and 1337x are not used: EZTV is unreliable, and 1337x needs a
+Cloudflare check FlareSolverr cannot pass.
+
+Sonarr is pinned to `lscr.io/linuxserver/sonarr:develop-5.0.0.2941-ls209`
+because the rqbit download client only exists in its develop builds. To bump it,
+change the tag in `docker-compose.yml`, then `./deploy.sh` and re-run
+`sudo python3 setup.py`. Sonarr's own web UI (port 8989) is for the admin only;
+the family never needs it.
+
+Setup also checks that Sonarr can hardlink from `downloads/` to `shows/`. If it
+cannot, setup says so and exits with an error after the stack is up.
+
 ## Deploying from a dev PC
 
 ```bash
@@ -114,12 +141,14 @@ It needs:
 
 | What | Where |
 |------|-------|
-| New downloads | `${DATA_PATH}/movies/<Title (Year)>/` |
+| New movie downloads | `${DATA_PATH}/movies/<Title (Year)>/` |
+| Show downloads (temporary) | `${DATA_PATH}/downloads/` |
+| Shows (Sonarr imports, hardlinked) | `${DATA_PATH}/shows/<Show (Year)>/Season NN/` |
 | v1 Radarr imports | `${DATA_PATH}/media/movies` (still visible in Infuse) |
 | Service configs | `${CONFIG_PATH}` (`/volume1/cinema/config`) |
 
 Back up `${CONFIG_PATH}`: it holds the Prowlarr indexers and API keys, the
-cinema state and the rqbit database.
+cinema state, the Sonarr database and the rqbit database.
 
 ## Troubleshooting
 
@@ -128,7 +157,7 @@ cinema state and the rqbit database.
   under **More versions**.
 - The Infuse share does not work: check that it is WebDAV, not SMB, with port
   8888 and path `/dav`.
-- Memory is small: cinema uses about 55 MiB and rqbit about 20 MiB.
+- Memory is small: cinema uses about 55 MiB, rqbit about 20 MiB and Sonarr about 250 MiB.
   `sudo docker stats --no-stream` shows the current numbers.
 
 ## Phone app development

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -41,10 +42,13 @@ class EnvConfig:
         self.all = values
 
 
-DATA_DIRS = ["movies"]
-CONFIG_SERVICES = ["prowlarr", "rqbit/db", "rqbit/cache", "cinema"]
+DATA_DIRS = ["movies", "downloads", "shows"]
+CONFIG_SERVICES = ["prowlarr", "rqbit/db", "rqbit/cache", "cinema", "sonarr"]
 
 DEFAULT_INDEXERS = ["The Pirate Bay", "YTS", "Knaben"]
+# EZTV and 1337x are not used: EZTV is unreliable and 1337x needs a Cloudflare solve.
+TV_INDEXERS = ["showRSS", "LimeTorrents", "TorrentDownload", "Nyaa.si"]
+SONARR_SYNC_CATEGORIES = [5000, 5010, 5020, 5030, 5040, 5045, 5050, 5070]
 
 
 def docker_bin() -> str:
@@ -63,6 +67,25 @@ class DirectorySetup:
             os.makedirs(os.path.join(self.data_path, d), exist_ok=True)
         for svc in CONFIG_SERVICES:
             os.makedirs(os.path.join(self.config_path, svc), exist_ok=True)
+
+
+def chown_tree(path: str, uid, gid):
+    """Recursively give path to uid:gid (numeric). Skips symlinks and correct owners."""
+    uid, gid = int(uid), int(gid)
+
+    def fix(p: str):
+        st = os.lstat(p)
+        if stat.S_ISLNK(st.st_mode):
+            return
+        if st.st_uid != uid or st.st_gid != gid:
+            os.lchown(p, uid, gid)
+
+    if not os.path.lexists(path):
+        return
+    fix(path)
+    for root, dirs, files in os.walk(path, followlinks=False):
+        for name in dirs + files:
+            fix(os.path.join(root, name))
 
 
 def prowlarr_running() -> bool:
@@ -147,12 +170,12 @@ class StackLauncher:
 
     @staticmethod
     def wait_for_config_files(config_path: str, timeout: int = 60):
-        files = [os.path.join(config_path, "prowlarr", "config.xml")]
-        print("Waiting for Prowlarr to generate its config file...")
+        files = [os.path.join(config_path, svc, "config.xml") for svc in ("prowlarr", "sonarr")]
+        print("Waiting for Prowlarr and Sonarr to generate their config files...")
         start = time.time()
         while (time.time() - start) < timeout:
             if all(os.path.exists(f) for f in files):
-                print("  Config file found.")
+                print("  Config files found.")
                 return
             time.sleep(3)
         missing = [f for f in files if not os.path.exists(f)]
@@ -194,6 +217,12 @@ def plan_prowlarr_changes(proxies: list, applications: list) -> tuple:
 def plan_indexers(indexers: list) -> list:
     """Names of public indexers to add: only when Prowlarr has none at all."""
     return [] if indexers else list(DEFAULT_INDEXERS)
+
+
+def plan_tv_indexers(existing: list) -> list:
+    """Names of the TV indexers Prowlarr does not have yet."""
+    have = {i.get("name") for i in existing}
+    return [n for n in TV_INDEXERS if n not in have]
 
 
 class ProwlarrConfigurator:
@@ -279,6 +308,38 @@ class ProwlarrConfigurator:
         if wanted:
             self._add_indexers(wanted)
 
+    def add_sonarr_application(self, sonarr_api_key: str):
+        applications = self._request("GET", "/applications")
+        if any(a.get("implementation") == "Sonarr" for a in applications):
+            print("  Sonarr application already present in Prowlarr")
+            return
+        try:
+            schemas = self._request("GET", "/applications/schema")
+            schema = next((s for s in schemas if s.get("implementation") == "Sonarr"), None)
+            if schema is None:
+                print("  WARNING: Sonarr not in Prowlarr's application schema")
+                return
+            values = {
+                "prowlarrUrl": "http://prowlarr:9696",
+                "baseUrl": "http://sonarr:8989",
+                "apiKey": sonarr_api_key,
+                "syncCategories": SONARR_SYNC_CATEGORIES,
+            }
+            fields = [dict(f, value=values[f["name"]]) if f["name"] in values else f
+                      for f in schema.get("fields", [])]
+            body = dict(schema, name="Sonarr", syncLevel="fullSync", fields=fields, tags=[])
+            self._request("POST", "/applications?forceSave=true", body)
+            print("  Sonarr application added to Prowlarr")
+        except Exception as e:
+            print(f"  WARNING: could not add the Sonarr application: {e}")
+
+    def add_tv_indexers(self):
+        wanted = plan_tv_indexers(self._request("GET", "/indexer"))
+        if wanted:
+            self._add_indexers(wanted)
+        else:
+            print("  TV indexers already present")
+
     def _add_indexers(self, wanted: list):
         schemas = self._request("GET", "/indexer/schema")
         for name in wanted:
@@ -292,6 +353,194 @@ class ProwlarrConfigurator:
                 print(f"  Indexer added: {name}")
             except Exception as e:
                 print(f"  WARNING: could not add indexer {name}: {e}")
+
+
+FRENCH_REGEX = r"\b(TRUE)?FRENCH\b|\bVF[FQI]?\b"
+MULTI_REGEX = r"\bMULTI\b"
+PROFILE_QUALITIES = ["HDTV-720p", "HDTV-1080p", "WEBRip-720p", "WEBRip-1080p", "WEBDL-720p",
+                     "WEBDL-1080p", "Bluray-720p", "Bluray-1080p"]
+PROFILE_CUTOFF = "WEBDL-1080p"
+FRENCH_ONLY_SCORE = -10000
+
+
+class SonarrConfigurator:
+    BASE_URL = "http://localhost:8989"
+
+    def __init__(self, config_path: str, puid: str, pgid: str):
+        config_xml = os.path.join(config_path, "sonarr", "config.xml")
+        self.api_key = ProwlarrConfigurator.read_api_key(config_xml)
+        self.puid = puid
+        self.pgid = pgid
+
+    def _request(self, method: str, path: str, body=None):
+        url = f"{self.BASE_URL}/api/v3{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        req = Request(url, data=data, method=method)
+        req.add_header("X-Api-Key", self.api_key)
+        req.add_header("Content-Type", "application/json")
+        resp = urlopen(req, timeout=60)
+        content = resp.read()
+        return json.loads(content) if content else None
+
+    def wait_until_ready(self, timeout: int = 120, interval: float = 3):
+        deadline = time.time() + timeout
+        while True:
+            try:
+                self._request("GET", "/system/status")
+                return
+            except Exception as e:
+                if time.time() >= deadline:
+                    print(f"  WARNING: Sonarr API not ready after {timeout}s: {e}")
+                    return
+                time.sleep(interval)
+
+    @staticmethod
+    def _set_fields(schema: dict, values: dict) -> list:
+        return [dict(f, value=values[f["name"]]) if f["name"] in values else f
+                for f in schema.get("fields", [])]
+
+    def _ensure_root_folder(self):
+        if any(r.get("path", "").rstrip("/") == "/data/shows"
+               for r in self._request("GET", "/rootfolder")):
+            print("  Sonarr root folder already set")
+            return
+        self._request("POST", "/rootfolder", {"path": "/data/shows"})
+        print("  Sonarr root folder added: /data/shows")
+
+    def _ensure_download_client(self):
+        if any(c.get("implementation") == "RQBit"
+               for c in self._request("GET", "/downloadclient")):
+            print("  Sonarr download client already present")
+        else:
+            schemas = self._request("GET", "/downloadclient/schema")
+            schema = next((s for s in schemas if s.get("implementation") == "RQBit"), None)
+            if schema is None:
+                print("  WARNING: RQBit not in Sonarr's download client schema")
+            else:
+                body = dict(
+                    schema, name="rqbit", enable=True, priority=1, tags=[],
+                    removeCompletedDownloads=False, removeFailedDownloads=True,
+                    fields=self._set_fields(schema, {
+                        "host": "rqbit", "port": 3030, "useSsl": False, "urlBase": "/"}))
+                self._request("POST", "/downloadclient", body)
+                print("  Sonarr download client added: rqbit")
+        # Completed download handling is what imports finished torrents.
+        conf = self._request("GET", "/config/downloadclient")
+        if not conf.get("enableCompletedDownloadHandling"):
+            self._request("PUT", f"/config/downloadclient/{conf['id']}",
+                          dict(conf, enableCompletedDownloadHandling=True))
+            print("  Sonarr completed download handling enabled")
+
+    def _ensure_hardlinks(self):
+        conf = self._request("GET", "/config/mediamanagement")
+        if conf.get("copyUsingHardlinks"):
+            return
+        self._request("PUT", f"/config/mediamanagement/{conf['id']}",
+                      dict(conf, copyUsingHardlinks=True))
+        print("  Sonarr set to import with hardlinks")
+
+    def _ensure_custom_format(self) -> int:
+        for cf in self._request("GET", "/customformat"):
+            if cf.get("name") == "French only":
+                return cf["id"]
+        schemas = self._request("GET", "/customformat/schema")
+        schema = next(s for s in schemas if s.get("implementation") == "ReleaseTitleSpecification")
+
+        def spec(name, regex, negate):
+            return dict(schema, name=name, negate=negate, required=True,
+                        fields=self._set_fields(schema, {"value": regex}))
+
+        created = self._request("POST", "/customformat", {
+            "name": "French only",
+            "includeCustomFormatWhenRenaming": False,
+            "specifications": [spec("French", FRENCH_REGEX, False),
+                               spec("Not MULTI", MULTI_REGEX, True)],
+        })
+        print("  Sonarr custom format added: French only")
+        return created["id"]
+
+    def _ensure_profile(self, name: str, french_score: int, format_id: int):
+        if any(p.get("name") == name for p in self._request("GET", "/qualityprofile")):
+            print(f"  Sonarr quality profile already present: {name}")
+            return
+        schema = self._request("GET", "/qualityprofile/schema")
+        cutoff = None
+        items = []
+        for item in schema["items"]:
+            item = dict(item)
+            children = item.get("items") or []
+            names = [c["quality"]["name"] for c in children] if children else \
+                [item["quality"]["name"]]
+            item["allowed"] = any(n in PROFILE_QUALITIES for n in names)
+            if children:
+                item["items"] = [dict(c, allowed=c["quality"]["name"] in PROFILE_QUALITIES)
+                                 for c in children]
+            if PROFILE_CUTOFF in names:
+                cutoff = item["id"] if children else item["quality"]["id"]
+            items.append(item)
+        if cutoff is None:
+            print(f"  WARNING: {PROFILE_CUTOFF} not in Sonarr's quality list; skipping {name}")
+            return
+        format_items = [dict(f, score=french_score if f.get("format") == format_id else 0)
+                        for f in schema.get("formatItems", [])]
+        if not any(f.get("format") == format_id for f in format_items):
+            format_items.append({"format": format_id, "name": "French only",
+                                 "score": french_score})
+        self._request("POST", "/qualityprofile", dict(
+            schema, name=name, upgradeAllowed=False, cutoff=cutoff, items=items,
+            minFormatScore=0, cutoffFormatScore=0, formatItems=format_items))
+        print(f"  Sonarr quality profile added: {name}")
+
+    def configure(self):
+        self.wait_until_ready()
+        self._ensure_root_folder()
+        self._ensure_download_client()
+        self._ensure_hardlinks()
+        format_id = self._ensure_custom_format()
+        self._ensure_profile("Cinema", FRENCH_ONLY_SCORE, format_id)
+        self._ensure_profile("Cinema FR", 0, format_id)
+
+
+HARDLINK_TEST_NAME = ".cinema-link-test"
+HARDLINK_HELP = (
+    "ERROR: hardlinks from downloads/ to shows/ do not work, so imports would copy.\n"
+    "Likely causes: rqbit is not running as PUID:PGID from .env (check\n"
+    "`docker inspect -f '{{.Config.User}}' rqbit`), or the kernel setting\n"
+    "fs.protected_hardlinks blocks the link (try `sudo sysctl fs.protected_hardlinks=0`).\n"
+    "The stack is up; fix the cause and run setup again.")
+
+
+def verify_hardlinks(data_path: str, puid: str, pgid: str) -> bool:
+    """True when Sonarr (as PUID:PGID) can hardlink downloads/ into shows/ and rqbit runs as that user."""
+    src = os.path.join(data_path, "downloads", HARDLINK_TEST_NAME)
+    dst = os.path.join(data_path, "shows", HARDLINK_TEST_NAME)
+
+    def remove_both():
+        for p in (src, dst):
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+
+    try:
+        remove_both()
+        with open(src, "w") as f:
+            f.write("cinema link test")
+        os.chown(src, int(puid), int(pgid))
+        ln = subprocess.run(
+            ["sudo", docker_bin(), "exec", "-u", f"{puid}:{pgid}", "sonarr", "ln",
+             f"/data/downloads/{HARDLINK_TEST_NAME}", f"/data/shows/{HARDLINK_TEST_NAME}"],
+            capture_output=True, text=True)
+        linked = ln.returncode == 0 and os.stat(src).st_ino == os.stat(dst).st_ino
+        inspect = subprocess.run(
+            ["sudo", docker_bin(), "inspect", "-f", "{{.Config.User}}", "rqbit"],
+            capture_output=True, text=True)
+        rqbit_ok = inspect.returncode == 0 and inspect.stdout.strip() == f"{puid}:{pgid}"
+        return linked and rqbit_ok
+    except OSError:
+        return False
+    finally:
+        remove_both()
 
 
 def dav_auth_warning(dav_user: Optional[str], dav_password: Optional[str]) -> Optional[str]:
@@ -350,6 +599,10 @@ def main():
     print("\n[Phase 2] Creating directories...")
     DirectorySetup(config.data_path, config.config_path).create()
     print("  Directories created.")
+    for d in DATA_DIRS:
+        chown_tree(os.path.join(config.data_path, d), config.puid, config.pgid)
+    for svc in ("rqbit", "sonarr"):
+        chown_tree(os.path.join(config.config_path, svc), config.puid, config.pgid)
 
     if migrate_prowlarr_config(config.v1_config_path, config.config_path):
         print("  Copied the v1 Prowlarr config.")
@@ -366,14 +619,27 @@ def main():
     launcher.wait_for_healthy()
 
     print("\n[Phase 4] Configuring Prowlarr...")
-    ProwlarrConfigurator(config.config_path).configure()
+    prowlarr = ProwlarrConfigurator(config.config_path)
+    prowlarr.configure()
+
+    print("\n[Phase 5] Configuring Sonarr...")
+    sonarr = SonarrConfigurator(config.config_path, config.puid, config.pgid)
+    sonarr.configure()
+    prowlarr.add_sonarr_application(sonarr.api_key)
+    prowlarr.add_tv_indexers()
+
+    print("\n[Phase 6] Checking hardlinks...")
+    hardlinks_ok = verify_hardlinks(config.data_path, config.puid, config.pgid)
+    if hardlinks_ok:
+        print("  Hardlinks work.")
 
     ip = detect_ip()
     print("\n" + "=" * 50)
     print("Setup complete!")
     print("=" * 50)
     print(f"\n  Phones (family catalog): http://{ip}:8888")
-    print(f"  Prowlarr:                http://{ip}:9696")
+    print(f"  Prowlarr (admin only):   http://{ip}:9696")
+    print(f"  Sonarr (admin only):     http://{ip}:8989")
     print("\nInfuse on Apple TV:")
     print("  1. Buy Infuse Pro (Family Sharing covers the household).")
     print("  2. Add share -> WebDAV (not SMB):")
@@ -381,6 +647,11 @@ def main():
     for line in infuse_login_lines(dav_user, dav_password):
         print(line)
     print("  3. Settings -> Subtitles: auto-download, English.")
+    print("  Infuse: Shows appear in the same share")
+    if not hardlinks_ok:
+        print()
+        print(HARDLINK_HELP)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
