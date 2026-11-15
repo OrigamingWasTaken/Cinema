@@ -26,6 +26,13 @@ def ep(id, *, season=1, aired=True, has_file=False, date="default"):
 H = 3600
 
 
+def iso(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+AGO_2H, AGO_25H = iso(NOW - 2 * H), iso(NOW - 25 * H)
+
+
 @pytest.mark.parametrize("episodes,monitored,queued,requested,state", [
     ([ep(1), ep(2)], True, {1}, None, "downloading"),
     ([ep(1, aired=False), ep(2, aired=False)], True, set(), None, "upcoming"),
@@ -37,6 +44,21 @@ H = 3600
     ([ep(1), ep(2)], True, set(), None, "not_found"),
     ([ep(1, has_file=True), ep(2)], False, set(), NOW - H, "partial"),
     ([ep(1), ep(2)], False, set(), None, "none"),
+    # The 24 h window restarts when a new episode airs without a file...
+    ([ep(1, has_file=True), ep(2, date=AGO_2H)], True, set(), NOW - 25 * H, "looking"),
+    ([ep(1, has_file=True), ep(2, date=AGO_2H)], True, set(), None, "looking"),  # followed
+    ([ep(1, has_file=True), ep(2, date=AGO_25H)], True, set(), None, "not_found"),
+    # ...counted from the newest aired episode still missing, not the newest aired one.
+    ([ep(1), ep(2, date=AGO_2H, has_file=True)], True, set(), None, "not_found"),
+    # Files on future or undated episodes do not stand in for a missing aired one.
+    ([ep(1, has_file=True), ep(2), ep(3, aired=False, has_file=True)], True, set(), None,
+     "not_found"),
+    ([ep(1, has_file=True), ep(2), ep(3, aired=False, has_file=True)], False, set(), None,
+     "partial"),
+    ([ep(1), ep(2, date=None, has_file=True)], True, set(), None, "not_found"),
+    # A season with files but no dated episodes is on the TV, not upcoming.
+    ([ep(1, date=None, has_file=True)], True, set(), None, "done"),
+    ([ep(1, date=None, has_file=True), ep(2, date=None)], False, set(), None, "done"),
 ])
 def test_season_state_table(episodes, monitored, queued, requested, state):
     got = season_state(episodes, monitored=monitored, queued=queued,

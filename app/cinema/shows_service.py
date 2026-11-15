@@ -46,19 +46,24 @@ def season_state(episodes: list[SonarrEpisode], *, monitored: bool, queued: set[
     if number is None:
         number = episodes[0].season if episodes else 0
     on_tv = sum(1 for e in episodes if e.has_file)
-    aired = sum(1 for e in episodes if _is_aired(e, now))
+    aired = [e for e in episodes if _is_aired(e, now)]
+    missing = [e for e in aired if not e.has_file]
     downloading = sum(1 for e in episodes if e.id in queued)
+    # "Looking" lasts 24 h from the request, or from the newest aired episode still
+    # missing when that is later (a new episode of a monitored season airs).
+    since = max((t for t in [requested_at, *(_aired_at(e) for e in missing)] if t is not None),
+                default=None)
+    looking = since is not None and now - since < LOOKING_SECONDS
     if downloading:
         state = "downloading"
-    elif aired == 0 and not (not episodes and requested_at is not None
-                             and now - requested_at < LOOKING_SECONDS):
-        state = "upcoming"
     elif not episodes:
         # Just requested: Sonarr has not created the episodes yet.
-        state = "looking"
-    elif on_tv == aired:
+        state = "looking" if looking else "upcoming"
+    elif not aired and not on_tv:
+        state = "upcoming"
+    elif not missing:
         state = "done"
-    elif monitored and requested_at is not None and now - requested_at < LOOKING_SECONDS:
+    elif monitored and looking:
         state = "looking"
     elif monitored:
         state = "not_found"
@@ -67,7 +72,7 @@ def season_state(episodes: list[SonarrEpisode], *, monitored: bool, queued: set[
     else:
         state = "none"
     return {"number": number, "state": state, "on_tv": on_tv, "total": len(episodes),
-            "aired": aired, "downloading": downloading}
+            "aired": len(aired), "downloading": downloading}
 
 
 def _episode_state(ep: SonarrEpisode, queued: set[int], now: float) -> str:
