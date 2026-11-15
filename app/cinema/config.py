@@ -27,6 +27,9 @@ class Settings:
     shows_dir: Path = Path("/data/shows")
     # Where rqbit puts Sonarr's torrents (rqbit's default folder; films never use it).
     downloads_dir: Path = Path("/data/downloads")
+    # ffprobe results (kept across restarts) and HLS segments (wiped at startup).
+    media_cache_dir: Path = Path("/config/media-cache")
+    hls_tmp_dir: Path = Path("/tmp/cinema-hls")
 
 
 def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
@@ -56,6 +59,8 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         sonarr_config_xml=sonarr_xml,
         shows_dir=Path(get("SHOWS_DIR", "/data/shows")),
         downloads_dir=Path(get("DOWNLOADS_DIR", "/data/downloads")),
+        media_cache_dir=Path(get("MEDIA_CACHE_DIR", "/config/media-cache")),
+        hls_tmp_dir=Path(get("HLS_TMP_DIR", "/tmp/cinema-hls")),
         dav_user=env.get("DAV_USER") or None,
         dav_password=env.get("DAV_PASSWORD") or None,
     )

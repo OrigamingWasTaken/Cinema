@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import shutil
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -12,6 +13,9 @@ from fastapi.staticfiles import StaticFiles
 from cinema.api import build_api_router, register_error_handlers
 from cinema.config import Settings, load_settings
 from cinema.downloads import run_poller
+from cinema.hls import StreamSessions
+from cinema.media import Prober
+from cinema.play import build_play_router
 from cinema.prowlarr import ProwlarrClient, api_key_from_config_xml
 from cinema.rqbit import RqbitClient
 from cinema.shows import ShowsTracker, run_shows_poller
@@ -50,7 +54,8 @@ def _sonarr_key(settings: Settings) -> Callable[[], str]:
 def create_app(settings: Settings, *, store: Store | None = None,
                rqbit: RqbitClient | None = None, tmdb: TmdbClient | None = None,
                prowlarr: ProwlarrClient | None = None, sonarr: SonarrClient | None = None,
-               shows: ShowsService | None = None, start_poller: bool = True,
+               shows: ShowsService | None = None, prober: Prober | None = None,
+               sessions: StreamSessions | None = None, start_poller: bool = True,
                clock: Callable[[], float] = time.monotonic,
                static_dir: Path | None = None) -> FastAPI:
     owned_http: httpx.AsyncClient | None = None
@@ -71,13 +76,24 @@ def create_app(settings: Settings, *, store: Store | None = None,
     if shows is None:
         shows = ShowsService(store, sonarr, tmdb, tracker, shows_dir=str(settings.shows_dir))
 
+    if prober is None:
+        prober = Prober(settings.media_cache_dir)
+    if sessions is None:
+        sessions = StreamSessions(tmp_root=settings.hls_tmp_dir)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # Leftovers of a crashed run.
+        shutil.rmtree(sessions.tmp_root, ignore_errors=True)
+        reaper = asyncio.create_task(sessions.run_reaper())
         pollers = ([asyncio.create_task(run_poller(store, rqbit)),
                     asyncio.create_task(run_shows_poller(tracker))] if start_poller else [])
         try:
             yield
         finally:
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
+            await sessions.close_all()
             for poller in pollers:
                 poller.cancel()
             await asyncio.gather(*pollers, return_exceptions=True)
@@ -100,6 +116,7 @@ def create_app(settings: Settings, *, store: Store | None = None,
     app.include_router(build_api_router(settings, store, rqbit, tmdb, prowlarr, clock, shows=shows,
                                      tracker=tracker),
                        prefix="/api")
+    app.include_router(build_play_router(store, tracker, prober, sessions), prefix="/api")
 
     auth = ((settings.dav_user, settings.dav_password)
             if settings.dav_user and settings.dav_password else None)
