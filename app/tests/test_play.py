@@ -1,11 +1,17 @@
+import asyncio
+import json
 import logging
+import time
 from dataclasses import replace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import cinema.main as main_mod
+import cinema.play as play_mod
 from cinema.hls import StreamSessions, Superseded
-from cinema.media import MediaError
+from cinema.media import MediaError, Prober
 from tests.test_hls import INFO, FakeRunner
 from tests.test_webdav import CONTENT, Env
 from tests.test_webdav_shows import entry
@@ -286,11 +292,6 @@ def test_superseded_wait_logs_at_debug(env, caplog):
 
 def test_lifespan_closes_pollers_and_http_even_if_close_all_fails(tmp_path, settings,
                                                                 monkeypatch):
-    import asyncio
-
-    import httpx
-
-    import cinema.main as main_mod
     cancelled, closed = [], []
 
     async def poller(*a, **k):
@@ -317,3 +318,34 @@ def test_lifespan_closes_pollers_and_http_even_if_close_all_fails(tmp_path, sett
         with TestClient(app):
             pass
     assert (len(cancelled), closed) == (2, [1])
+
+
+def test_preparing_then_ready_with_a_real_prober(tmp_path, settings, monkeypatch):
+    monkeypatch.setattr(play_mod, "INDEX_WAIT_S", 0.2)
+    scans = []
+
+    async def ffprobe(args, timeout=None):
+        if "csv=p=0" in args:  # the keyframe index of a long file
+            scans.append(1)
+            await asyncio.sleep(1.0)
+            return "".join(f"{t}.0,K_\n" for t in range(0, 300, 2))
+        return json.dumps({"format": {"duration": "300.0", "format_name": "matroska"},
+                           "streams": [{"codec_type": "video", "codec_name": "h264",
+                                        "profile": "High", "level": 40},
+                                       {"codec_type": "audio", "codec_name": "ac3"}]})
+
+    env = PlayEnv(tmp_path, settings)
+    app = main_mod.create_app(env.settings, store=env.store, rqbit=env.rqbit,
+                              prober=Prober(tmp_path / "cache", ffprobe), sessions=env.sessions,
+                              start_poller=False)
+    m = env.add_done()
+    base = f"/api/play/movie/{m.tmdb_id}"
+    with TestClient(app) as c:
+        info = c.get(base)
+        assert info.status_code == 200 and info.json()["duration"] == 300.0
+        r = c.get(f"{base}/index.m3u8", params={"d": DEV})
+        assert (r.status_code, r.json()) == (503, {"error": "preparing"})
+        time.sleep(1.2)
+        r = c.get(f"{base}/index.m3u8", params={"d": DEV})
+        assert r.status_code == 200 and r.text.count("#EXTINF") == 50
+    assert scans == [1]  # started by the info request, and only once
