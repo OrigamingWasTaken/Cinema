@@ -20,6 +20,11 @@ class Settings:
     dav_password: str | None
     # Read again later while the key is still unknown (Prowlarr writes it on first start).
     prowlarr_config_xml: Path | None = None
+    sonarr_url: str = "http://sonarr:8989"
+    sonarr_api_key: str = ""
+    # Same: Sonarr writes its key on first start.
+    sonarr_config_xml: Path | None = None
+    shows_dir: Path = Path("/data/shows")
 
 
 def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
@@ -32,6 +37,8 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         raise RuntimeError("TMDB_TOKEN is required")
     config_xml = Path(get("PROWLARR_CONFIG_XML", "/prowlarr-config/config.xml"))
     api_key = env.get("PROWLARR_API_KEY") or api_key_from_config_xml(config_xml)
+    sonarr_xml = Path(get("SONARR_CONFIG_XML", "/sonarr-config/config.xml"))
+    sonarr_key = env.get("SONARR_API_KEY") or api_key_from_config_xml(sonarr_xml)
     return Settings(
         tmdb_token=token,
         tmdb_language=get("TMDB_LANGUAGE", "en-US"),
@@ -42,6 +49,10 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         legacy_dir=Path(get("LEGACY_DIR", "/data/media/movies")),
         db_path=Path(get("DB_PATH", "/config/cinema.db")),
         prowlarr_config_xml=config_xml,
+        sonarr_url=get("SONARR_URL", "http://sonarr:8989"),
+        sonarr_api_key=sonarr_key,
+        sonarr_config_xml=sonarr_xml,
+        shows_dir=Path(get("SHOWS_DIR", "/data/shows")),
         dav_user=env.get("DAV_USER") or None,
         dav_password=env.get("DAV_PASSWORD") or None,
     )

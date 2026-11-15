@@ -45,6 +45,15 @@ def test_season_state_table(episodes, monitored, queued, requested, state):
     assert got["number"] == 1
 
 
+def test_season_state_fresh_request_without_episodes_is_looking():
+    got = season_state([], monitored=True, queued=set(), requested_at=NOW - H, now=NOW,
+                       number=1)
+    assert got["state"] == "looking"
+    stale = season_state([], monitored=True, queued=set(), requested_at=NOW - 25 * H, now=NOW,
+                         number=1)
+    assert stale["state"] == "upcoming"
+
+
 def test_season_state_counts():
     got = season_state([ep(1, has_file=True), ep(2), ep(3, aired=False)], monitored=True,
                        queued={2}, requested_at=None, now=NOW)
@@ -294,6 +303,15 @@ async def test_follow_new_series_gives_up_waiting(env):
     assert len(waits) == 30
     assert writes(env.fake) == [("POST", "/api/v3/series")]
     assert page["following"] is True
+
+
+@pytest.mark.anyio
+async def test_follow_skips_airing_season_while_add_options_pending(env):
+    env.tmdb_fake.shows[TMDB] = info(airing=True)
+    env.fake.series[5] = {**series_dict(), "addOptions": {"monitor": "future"}}
+    env.fake.episodes = [ep_dict(101, 1, file_id=9), ep_dict(102, 1, aired=False)]
+    await env.follow(TMDB)
+    assert writes(env.fake) == [("PUT", "/api/v3/series/5")]
 
 
 @pytest.mark.anyio

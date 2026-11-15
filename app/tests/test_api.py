@@ -320,7 +320,7 @@ async def test_search_empty_query_no_tmdb_call(settings, tmp_path):
         return httpx.Response(200, json={"results": []})
     client, _, _ = build(settings, tmp_path, tmdb=handler)
     body = (await client.get("/api/search", params={"q": "  "})).json()
-    assert body == {"films": [], "results": [], "people": [], "studios": [], "collections": []}
+    assert body == {"films": [], "results": [], "shows": [], "people": [], "studios": [], "collections": []}
     assert calls == []
 
 

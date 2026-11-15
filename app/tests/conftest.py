@@ -19,6 +19,10 @@ def settings(tmp_path):
         movies_dir=tmp_path / "movies",
         legacy_dir=tmp_path / "legacy",
         db_path=tmp_path / "cinema.db",
+        sonarr_url="http://sonarr:8989",
+        sonarr_api_key="",
+        sonarr_config_xml=None,
+        shows_dir=tmp_path / "shows",
         dav_user=None,
         dav_password=None,
     )

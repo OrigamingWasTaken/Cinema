@@ -12,8 +12,11 @@ from fastapi.staticfiles import StaticFiles
 from cinema.api import build_api_router, register_error_handlers
 from cinema.config import Settings, load_settings
 from cinema.downloads import run_poller
-from cinema.prowlarr import ProwlarrClient
+from cinema.prowlarr import ProwlarrClient, api_key_from_config_xml
 from cinema.rqbit import RqbitClient
+from cinema.shows import ShowsTracker, run_shows_poller
+from cinema.shows_service import ShowsService
+from cinema.sonarr import SonarrClient
 from cinema.store import Store
 from cinema.tmdb import TmdbClient
 from cinema.webdav import build_dav_router
@@ -32,13 +35,26 @@ class StaticApp(StaticFiles):
         return response
 
 
+def _sonarr_key(settings: Settings) -> Callable[[], str]:
+    """The key, read from Sonarr's config.xml again until it shows up (first start)."""
+    known = settings.sonarr_api_key
+
+    def key() -> str:
+        nonlocal known
+        if not known and settings.sonarr_config_xml is not None:
+            known = api_key_from_config_xml(settings.sonarr_config_xml)
+        return known
+    return key
+
+
 def create_app(settings: Settings, *, store: Store | None = None,
                rqbit: RqbitClient | None = None, tmdb: TmdbClient | None = None,
-               prowlarr: ProwlarrClient | None = None, start_poller: bool = True,
+               prowlarr: ProwlarrClient | None = None, sonarr: SonarrClient | None = None,
+               shows: ShowsService | None = None, start_poller: bool = True,
                clock: Callable[[], float] = time.monotonic,
                static_dir: Path | None = None) -> FastAPI:
     owned_http: httpx.AsyncClient | None = None
-    if rqbit is None or tmdb is None or prowlarr is None:
+    if rqbit is None or tmdb is None or prowlarr is None or sonarr is None:
         owned_http = httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5))
     if rqbit is None:
         rqbit = RqbitClient(settings.rqbit_url, owned_http)
@@ -47,18 +63,24 @@ def create_app(settings: Settings, *, store: Store | None = None,
     if prowlarr is None:
         prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key, owned_http,
                                   config_xml=settings.prowlarr_config_xml)
+    if sonarr is None:
+        sonarr = SonarrClient(settings.sonarr_url, _sonarr_key(settings), owned_http)
     if store is None:
         store = Store(settings.db_path)
+    tracker = ShowsTracker(store, sonarr, rqbit)
+    if shows is None:
+        shows = ShowsService(store, sonarr, tmdb, tracker, shows_dir=str(settings.shows_dir))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        poller = asyncio.create_task(run_poller(store, rqbit)) if start_poller else None
+        pollers = ([asyncio.create_task(run_poller(store, rqbit)),
+                    asyncio.create_task(run_shows_poller(tracker))] if start_poller else [])
         try:
             yield
         finally:
-            if poller is not None:
+            for poller in pollers:
                 poller.cancel()
-                await asyncio.gather(poller, return_exceptions=True)
+            await asyncio.gather(*pollers, return_exceptions=True)
             if owned_http is not None:
                 await owned_http.aclose()
 
@@ -67,18 +89,22 @@ def create_app(settings: Settings, *, store: Store | None = None,
     app.state.store = store
     app.state.rqbit = rqbit
     app.state.prowlarr = prowlarr
+    app.state.sonarr = sonarr
+    app.state.tracker = tracker
 
     @app.get("/healthz")
     def healthz():
         return {"ok": True}
 
     register_error_handlers(app)
-    app.include_router(build_api_router(settings, store, rqbit, tmdb, prowlarr, clock),
+    app.include_router(build_api_router(settings, store, rqbit, tmdb, prowlarr, clock, shows=shows,
+                                     tracker=tracker),
                        prefix="/api")
 
     auth = ((settings.dav_user, settings.dav_password)
             if settings.dav_user and settings.dav_password else None)
-    app.include_router(build_dav_router(store, rqbit, rqbit.http, settings.legacy_dir, auth))
+    app.include_router(build_dav_router(store, rqbit, rqbit.http, settings.legacy_dir, auth,
+                                         tracker))
     # Last: the catch-all mount must not shadow /api, /dav or /healthz.
     static_dir = STATIC_DIR if static_dir is None else static_dir
     if not static_dir.is_dir():

@@ -50,8 +50,12 @@ def season_state(episodes: list[SonarrEpisode], *, monitored: bool, queued: set[
     downloading = sum(1 for e in episodes if e.id in queued)
     if downloading:
         state = "downloading"
-    elif aired == 0:
+    elif aired == 0 and not (not episodes and requested_at is not None
+                             and now - requested_at < LOOKING_SECONDS):
         state = "upcoming"
+    elif not episodes:
+        # Just requested: Sonarr has not created the episodes yet.
+        state = "looking"
     elif on_tv == aired:
         state = "done"
     elif monitored and requested_at is not None and now - requested_at < LOOKING_SECONDS:
@@ -214,6 +218,10 @@ class ShowsService:
                 series = await self._wait_for_refresh(series)
             else:
                 series = await self.sonarr.update_series(series, monitorNewItems="all")
+            if series.raw.get("addOptions") is not None:
+                # Sonarr never finished its first refresh; it will apply the add options
+                # (and the airing season's search) itself, and episodes may not exist yet.
+                return await self.page(tmdb_id)
             now = self.now()
             by_season: dict[int, list[SonarrEpisode]] = {}
             for e in await self.sonarr.episodes(series.id):

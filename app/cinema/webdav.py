@@ -11,6 +11,7 @@ import secrets
 import unicodedata
 import xml.etree.ElementTree as ET
 from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 from email.utils import formatdate
 from pathlib import Path
@@ -24,6 +25,9 @@ from starlette.responses import FileResponse, Response, StreamingResponse
 
 from cinema.rqbit import VIDEO_EXTENSIONS, RqbitClient
 from cinema.store import Movie, Store, library_name
+
+if TYPE_CHECKING:  # cinema.shows imports this module
+    from cinema.shows import ShowsTracker
 
 READY_BYTES = 100 * 1024**2
 ALLOW = "OPTIONS, PROPFIND, GET, HEAD"
@@ -213,7 +217,9 @@ def _authorized(request: Request, auth: tuple[str, str]) -> bool:
 
 
 def build_dav_router(store: Store, rqbit: RqbitClient, http: httpx.AsyncClient,
-                     legacy_dir: Path, auth: tuple[str, str] | None) -> APIRouter:
+                     legacy_dir: Path, auth: tuple[str, str] | None,
+                     tracker: "ShowsTracker | None" = None) -> APIRouter:
+    # tracker: serves /dav/Shows (Task 7); not used yet.
     router = APIRouter()
 
     async def propfind(request: Request, segments: list[str]) -> Response:
