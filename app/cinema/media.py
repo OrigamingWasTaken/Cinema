@@ -1,5 +1,6 @@
 """Probe a media file with ffprobe: duration, codecs, and the keyframe index."""
 import asyncio
+import contextlib
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
@@ -21,13 +22,22 @@ class MediaInfo:
     keyframes: tuple[float, ...]
 
 
-async def run_tool(args: list[str]) -> str:
+async def run_tool(args: list[str], timeout: float = 300.0) -> str:
+    """Run a tool and return its stdout. The child is killed on timeout or cancellation."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as e:
         raise MediaError(f"cannot run {args[0]}: {e}") from e
-    out, err = await proc.communicate()
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except BaseException as e:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        if isinstance(e, TimeoutError):
+            raise MediaError(f"{args[0]} timed out after {timeout:g} s") from None
+        raise
     if proc.returncode != 0:
         raise MediaError(f"{args[0]} exited {proc.returncode}: {err.decode(errors='replace')[-300:]}")
     return out.decode(errors="replace")
@@ -76,6 +86,22 @@ def _container(path: Path, format_name: str) -> str:
     return names[0]
 
 
+# Bump when the cached MediaInfo changes meaning (2: keyframes relative to the file start).
+_CACHE_VERSION = 2
+
+
+def _keyframes(raw: str, start: float) -> tuple[float, ...]:
+    """Keyframe times relative to the file start, as ffmpeg -ss and -copyts -start_at_zero
+    count them. Negative times are dropped and the list always begins at exactly 0.0."""
+    times = {round(float(v) - start, 6) + 0.0 for v in
+             (line.split(",")[0].strip() for line in raw.splitlines())
+             if v and v != "N/A"}
+    frames = sorted(t for t in times if t >= 0)
+    if not frames or frames[0] != 0.0:
+        frames.insert(0, 0.0)
+    return tuple(frames)
+
+
 class Prober:
     def __init__(self, cache_dir: Path,
                  run: Callable[[list[str]], Awaitable[str]] = run_tool) -> None:
@@ -84,8 +110,12 @@ class Prober:
         self._inflight: dict[str, asyncio.Task[MediaInfo]] = {}
 
     async def probe(self, path: Path) -> MediaInfo:
-        st = path.stat()
-        key = hashlib.sha1(f"{path}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()
+        try:
+            st = path.stat()
+        except OSError as e:
+            raise MediaError(f"cannot read {path.name}: {e.strerror}") from e
+        key = hashlib.sha1(
+            f"{_CACHE_VERSION}|{path}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()
         cached = self.cache_dir / f"{key}.json"
         try:
             data = json.loads(cached.read_text())
@@ -111,16 +141,15 @@ class Prober:
             video = next(s for s in streams if s.get("codec_type") == "video")
             audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
             fmt = data.get("format", {})
-            frames = sorted({round(float(v), 6) for v in
-                             (line.split(",")[0].strip() for line in kf_raw.splitlines())
-                             if v and v != "N/A"})
+            start = fmt.get("start_time")
+            frames = _keyframes(kf_raw, float(start) if start not in (None, "N/A") else 0.0)
             info = MediaInfo(
                 duration=float(fmt.get("duration") or video.get("duration")),
                 container=_container(path, str(fmt.get("format_name", ""))),
                 video_codec=str(video.get("codec_name")),
                 codec_string=codec_string(video),
                 audio_codec=audio.get("codec_name") if audio else None,
-                keyframes=tuple(frames),
+                keyframes=frames,
             )
         except (ValueError, TypeError, StopIteration, KeyError) as e:
             raise MediaError(f"unreadable ffprobe output for {path.name}") from e

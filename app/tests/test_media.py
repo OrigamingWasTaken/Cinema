@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from cinema.media import MediaError, MediaInfo, Prober, codec_string
+from cinema.media import MediaError, MediaInfo, Prober, codec_string, run_tool
 
 INFO = json.dumps({
     "format": {"duration": "12.0", "format_name": "matroska,webm"},
@@ -97,3 +97,68 @@ async def test_real_ffprobe_on_generated_sample(tmp_path):
     assert info.audio_codec == "ac3"
     assert info.container == "mkv"
     assert info.codec_string.startswith("avc1.")
+
+
+def fake_run_with(info: dict, keyframes: str):
+    async def run(args):
+        return keyframes if "csv=p=0" in args else json.dumps(info)
+    return run
+
+
+@pytest.mark.anyio
+async def test_keyframes_are_relative_to_the_file_start(tmp_path):
+    f = tmp_path / "a.mkv"
+    f.write_bytes(b"x")
+    info = {"format": {"duration": "12.0", "start_time": "1.500000", "format_name": "matroska"},
+            "streams": [{"codec_type": "video", "codec_name": "h264"}]}
+    got = await Prober(tmp_path / "cache", fake_run_with(info, "1.500000\n3.500000\n5.5\n")).probe(f)
+    assert got.keyframes == (0.0, 2.0, 4.0)
+
+
+@pytest.mark.anyio
+async def test_keyframes_drop_negatives_and_start_at_zero(tmp_path):
+    f = tmp_path / "a.mp4"
+    f.write_bytes(b"x")
+    info = {"format": {"duration": "12.0", "start_time": "0.000000", "format_name": "mov,mp4"},
+            "streams": [{"codec_type": "video", "codec_name": "h264"}]}
+    got = await Prober(tmp_path / "cache", fake_run_with(info, "-0.083\n0.042\n2.042\n")).probe(f)
+    assert got.keyframes == (0.0, 0.042, 2.042)
+    assert str(got.keyframes[0]) == "0.0"
+
+
+@pytest.mark.anyio
+async def test_probe_missing_file_is_media_error(tmp_path):
+    with pytest.raises(MediaError):
+        await Prober(tmp_path / "cache", fake_run([])).probe(tmp_path / "gone.mkv")
+
+
+@pytest.fixture
+def spawned(monkeypatch):
+    procs = []
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*args, **kwargs):
+        proc = await real(*args, **kwargs)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    return procs
+
+
+@pytest.mark.anyio
+async def test_run_tool_times_out_and_kills_the_child(spawned):
+    with pytest.raises(MediaError, match="timed out"):
+        await run_tool(["sleep", "30"], timeout=0.2)
+    assert await asyncio.wait_for(spawned[0].wait(), 2) == -9
+
+
+@pytest.mark.anyio
+async def test_run_tool_cancelled_kills_the_child(spawned):
+    task = asyncio.ensure_future(run_tool(["sleep", "30"]))
+    while not spawned:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.wait_for(spawned[0].wait(), 2) == -9
