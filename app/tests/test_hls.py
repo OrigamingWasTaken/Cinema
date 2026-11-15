@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -70,16 +71,20 @@ class FakeRunner:
 
     def __init__(self, ahead=5):
         self.ahead = ahead
+        self.ends = False  # new processes end at once (a crash)
+        self.writes_init = True
         self.starts = []
         self.procs = []
 
     def start(self, path, info, segments, first, out_dir):
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "init.mp4").write_bytes(b"init")
+        if self.writes_init:
+            (out_dir / "init.mp4").write_bytes(b"init")
         for n in range(first, min(first + self.ahead, len(segments))):
             (out_dir / f"{n}.m4s").write_bytes(f"seg{n}".encode())
         self.starts.append(first)
         self.procs.append(FakeProc())
+        self.procs[-1].finished = self.ends
         return self.procs[-1]
 
 
@@ -126,6 +131,7 @@ async def test_same_device_replaces_session(tmp_path):
     await s.segment(("d2", "m1"), tmp_path / "f.mkv", INFO, 0)
     old_dirs = set((tmp_path / "hls").iterdir())
     await s.segment(("d1", "m2"), tmp_path / "g.mkv", INFO, 0)
+    await s.drain()
     assert runner.procs[0].killed and not runner.procs[1].killed
     assert len(set((tmp_path / "hls").iterdir()) - old_dirs) == 1
     assert len(list((tmp_path / "hls").iterdir())) == 2
@@ -145,6 +151,7 @@ async def test_idle_session_killed_and_cleaned(tmp_path):
     await s.segment(("d2", "m1"), tmp_path / "f.mkv", INFO, 1)
     clock.t += 30
     s.reap()
+    await s.drain()
     assert runner.procs[0].killed and not runner.procs[1].killed
     assert len(list((tmp_path / "hls").iterdir())) == 1
     # the freed slot can be taken again
@@ -176,11 +183,10 @@ async def test_seek_restarts_at_segment(tmp_path):
     # behind the running process: restart there
     assert (await s.segment(key, f, INFO, 39)).read_bytes() == b"seg39"
     assert runner.starts == [0, 40, 39]
-    # within 3 of the newest written segment (43): no restart, even if ffmpeg ended
+    # within 3 of the newest written segment (43), but ffmpeg ended without it: restart
     runner.procs[-1].finished = True
-    with pytest.raises(MediaError):
-        await s.segment(key, f, INFO, 46)
-    assert runner.starts == [0, 40, 39]
+    assert (await s.segment(key, f, INFO, 46)).read_bytes() == b"seg46"
+    assert runner.starts == [0, 40, 39, 46]
 
 
 @pytest.mark.anyio
@@ -195,13 +201,36 @@ async def test_segment_waits_until_the_next_one_exists(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_ended_process_without_the_segment_is_media_error(tmp_path):
+async def test_init_restarts_a_run_that_died_before_writing_it(tmp_path):
+    runner = FakeRunner()
+    runner.ends, runner.writes_init = True, False
+    s = sessions_for(tmp_path, runner)
+    key, f = ("d1", "m1"), tmp_path / "f.mkv"
+    with pytest.raises(MediaError):
+        await s.init(key, f, INFO)
+    runner.ends, runner.writes_init = False, True
+    assert (await s.init(key, f, INFO)).read_bytes() == b"init"
+    assert runner.starts == [0, 0]
+
+
+@pytest.mark.anyio
+async def test_dead_run_is_restarted_and_a_failing_restart_is_media_error(tmp_path):
     runner = FakeRunner(ahead=1)
     s = sessions_for(tmp_path, runner)
-    await s.init(("d1", "m1"), tmp_path / "f.mkv", INFO)
-    runner.procs[0].finished = True
-    with pytest.raises(MediaError):
-        await s.segment(("d1", "m1"), tmp_path / "f.mkv", INFO, 2)
+    key, f = ("d1", "m1"), tmp_path / "f.mkv"
+    await s.init(key, f, INFO)
+    runner.procs[0].finished = True  # crashed after writing segment 0
+    runner.ahead, runner.ends = 0, True
+    with pytest.raises(MediaError):  # restarted at 2, and that run dies too
+        await s.segment(key, f, INFO, 2)
+    assert runner.starts == [0, 2]
+    # the init is kept from the first run, so it needs no ffmpeg
+    assert (await s.init(key, f, INFO)).read_bytes() == b"init"
+    assert runner.starts == [0, 2]
+    runner.ahead, runner.ends = 5, False
+    # a retry (or a player reload, same key) gets a fresh run instead of the dead one
+    assert (await s.segment(key, f, INFO, 2)).read_bytes() == b"seg2"
+    assert runner.starts == [0, 2, 2]
 
 
 @pytest.mark.anyio
@@ -254,6 +283,7 @@ async def test_paused_session_reaped_cleanly(tmp_path):
     assert runner.procs[0].paused
     clock.t += 60
     s.reap()
+    await s.drain()
     assert runner.procs[0].killed
     assert list((tmp_path / "hls").iterdir()) == []
 
@@ -266,7 +296,51 @@ def test_paused_process_can_be_killed():
     proc.resume()
     proc.pause()
     proc.kill()
+    deadline = time.monotonic() + 2
+    while not proc.done() and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert proc.done()
+
+
+class SleepRunner(FakeRunner):
+    """Writes files like FakeRunner, but each run is a real (sleeping) process."""
+
+    def start(self, path, info, segments, first, out_dir):
+        super().start(path, info, segments, first, out_dir)
+        self.procs[-1] = _Process(subprocess.Popen(["sleep", "30"]))
+        return self.procs[-1]
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(shutil.which("sleep") is None, reason="no sleep")
+async def test_kill_restart_and_reap_do_not_block(tmp_path, monkeypatch):
+    real_wait, real_rmtree = subprocess.Popen.wait, shutil.rmtree
+
+    def slow_wait(self, timeout=None):  # an ffmpeg stuck in uninterruptible IO
+        time.sleep(1)
+        return real_wait(self, timeout)
+
+    def slow_rmtree(path, *args, **kwargs):
+        time.sleep(1)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", slow_wait)
+    monkeypatch.setattr(shutil, "rmtree", slow_rmtree)
+    runner, clock = SleepRunner(ahead=3), Clock()
+    s = sessions_for(tmp_path, runner, clock)
+    key, f = ("d1", "m1"), tmp_path / "f.mkv"
+    await s.segment(key, f, INFO, 0)
+
+    t = time.monotonic()
+    await s.segment(key, f, INFO, 40)  # restart: kills run 1, deletes its dir
+    await s.segment(("d1", "m2"), f, INFO, 0)  # replaces the session
+    clock.t += 60
+    s.reap()  # reaps the last one
+    assert time.monotonic() - t < 0.5
+
+    await s.close_all()  # waits for the clean-up off the event loop
+    assert all(p.done() for p in runner.procs)
+    assert list((tmp_path / "hls").iterdir()) == []
 
 
 def test_ffmpeg_command_shape(tmp_path):

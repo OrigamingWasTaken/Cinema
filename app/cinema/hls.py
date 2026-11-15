@@ -102,13 +102,10 @@ class _Process:
                 pass
 
     def kill(self) -> None:
+        """Signal only, never wait: done() (a non-blocking poll) reaps the process."""
         if self._popen.poll() is None:
             self._popen.kill()  # SIGKILL also ends a stopped process
             self._signal(signal.SIGCONT)
-        try:
-            self._popen.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            log.warning("ffmpeg %s did not exit after SIGKILL", self._popen.pid)
 
 
 class FfmpegRunner:
@@ -221,15 +218,19 @@ class StreamSessions:
         self.wait_s = wait_s
         self._now = now
         self._sessions: dict[tuple[str, str], _Session] = {}
+        # Killed processes not yet reaped, and directory removals running in threads:
+        # nothing here may block the event loop that also serves WebDAV.
+        self._dying: list[Proc] = []
+        self._removals: set[asyncio.Future] = set()
 
     async def init(self, key: tuple[str, str], path: Path, info: MediaInfo) -> Path:
         s = self._session(key, info)
         kept = s.dir / "init.mp4"
         if kept.exists():
             return kept
-        if s.run is None:
-            self._start(s, path, info, 0)
         run = s.run
+        if run is None or (run.proc.done() and not (run.dir / "init.mp4").exists()):
+            run = self._start(s, path, info, run.first if run else 0)
         made, first = run.dir / "init.mp4", run.dir / f"{run.first}.m4s"
         await self._wait(s, run, lambda ended: made.exists() and (ended or first.exists()),
                          "the init segment")
@@ -251,7 +252,7 @@ class StreamSessions:
             raise IndexError(f"no segment {n}")
         run = s.run
         s.requested = n
-        if run is None or n < run.kept_from or n > self._newest(run) + LOOKAHEAD:
+        if run is None or self._must_restart(run, n):
             run = self._start(s, path, info, n)
         self._trim(run, n)
         self._pace(s)
@@ -270,10 +271,23 @@ class StreamSessions:
                 self._close(s)
             else:
                 self._pace(s)
+        self._collect()
 
     async def close_all(self) -> None:
         for s in list(self._sessions.values()):
             self._close(s)
+        await self.drain()
+
+    async def drain(self) -> None:
+        """Wait, without blocking the loop, until killed processes are reaped and
+        deleted directories are gone."""
+        deadline = time.monotonic() + 5
+        while self._collect() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        if self._dying:
+            log.warning("%d ffmpeg processes still running after SIGKILL", len(self._dying))
+        while self._removals:
+            await asyncio.gather(*self._removals, return_exceptions=True)
 
     async def run_reaper(self, interval: float = 10.0) -> None:
         """Reap idle sessions every `interval`; between those, keep ffmpeg paced."""
@@ -287,6 +301,7 @@ class StreamSessions:
                 else:
                     for s in list(self._sessions.values()):
                         self._pace(s)
+                    self._collect()
             except Exception:
                 log.exception("stream session reaper failed")
 
@@ -316,17 +331,40 @@ class StreamSessions:
         s.run = _Run(first, out, proc, first - 1, first)
         return s.run
 
-    @staticmethod
-    def _stop(run: _Run) -> None:
+    def _must_restart(self, run: _Run, n: int) -> bool:
+        if n < run.kept_from or n > self._newest(run) + LOOKAHEAD:
+            return True
+        # ffmpeg ended (crash, OOM, full disk) without writing n: a normal end has
+        # written every segment, so this run can never serve n.
+        return run.proc.done() and not (run.dir / f"{n}.m4s").exists()
+
+    def _stop(self, run: _Run) -> None:
         run.proc.kill()
-        shutil.rmtree(run.dir, ignore_errors=True)
+        self._dying.append(run.proc)
+        self._remove(run.dir)
 
     def _close(self, s: _Session) -> None:
         self._sessions.pop(s.key, None)
         if s.run is not None:
             self._stop(s.run)
             s.run = None
-        shutil.rmtree(s.dir, ignore_errors=True)
+        self._remove(s.dir)
+
+    def _remove(self, d: Path) -> None:
+        """Delete a directory in a worker thread; a slow disk must not stall the loop."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            shutil.rmtree(d, ignore_errors=True)
+            return
+        fut = asyncio.ensure_future(asyncio.to_thread(shutil.rmtree, d, ignore_errors=True))
+        self._removals.add(fut)
+        fut.add_done_callback(self._removals.discard)
+
+    def _collect(self) -> list[Proc]:
+        """Reap killed processes that have exited (done() polls without blocking)."""
+        self._dying = [p for p in self._dying if not p.done()]
+        return self._dying
 
     def _pace(self, s: _Session) -> None:
         """Pause ffmpeg once it is MAX_AHEAD segments past the last request, so converted
