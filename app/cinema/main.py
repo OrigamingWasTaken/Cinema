@@ -51,6 +51,24 @@ def _sonarr_key(settings: Settings) -> Callable[[], str]:
     return key
 
 
+def _clear_dir(root: Path) -> None:
+    """Empty `root` (never remove it), creating it if missing; failures are logged."""
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        children = list(root.iterdir())
+    except OSError as e:
+        log.warning("cannot prepare %s: %s", root, e)
+        return
+    for child in children:
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        except OSError as e:
+            log.warning("cannot remove %s: %s", child, e)
+
+
 def create_app(settings: Settings, *, store: Store | None = None,
                rqbit: RqbitClient | None = None, tmdb: TmdbClient | None = None,
                prowlarr: ProwlarrClient | None = None, sonarr: SonarrClient | None = None,
@@ -84,7 +102,7 @@ def create_app(settings: Settings, *, store: Store | None = None,
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         # Leftovers of a crashed run.
-        shutil.rmtree(sessions.tmp_root, ignore_errors=True)
+        _clear_dir(sessions.tmp_root)
         reaper = asyncio.create_task(sessions.run_reaper())
         pollers = ([asyncio.create_task(run_poller(store, rqbit)),
                     asyncio.create_task(run_shows_poller(tracker))] if start_poller else [])

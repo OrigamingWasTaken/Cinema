@@ -176,3 +176,26 @@ def test_media_error_is_502_player(env):
     env.sessions.init = full
     r = c.get(f"/api/play/movie/{m.tmdb_id}/init.mp4", params={"d": DEV})
     assert (r.status_code, r.json()["service"]) == (502, "player")
+
+
+def test_lifespan_clears_stale_runs_and_closes_sessions(tmp_path, settings):
+    env = PlayEnv(tmp_path, settings)
+    root = env.sessions.tmp_root
+    stale = root / "stale"
+    stale.mkdir(parents=True)
+    (stale / "x.m4s").write_bytes(b"x")
+    m = env.add_done()
+    with TestClient(env.app) as c:
+        assert not stale.exists() and root.is_dir()
+        r = c.get(f"/api/play/movie/{m.tmdb_id}/index.m3u8", params={"d": DEV})
+        assert r.status_code == 200
+        assert len(list(root.iterdir())) == 1
+    assert root.is_dir() and list(root.iterdir()) == []
+    assert env.sessions.runner.procs and all(p.killed for p in env.sessions.runner.procs)
+
+
+def test_episode_skips_a_matching_entry_without_a_file(env):
+    path = env.show(season=1, episode=1, last_episode=1)
+    missing = replace(env.tracker.entries[0], path=env.tmp / "gone.mkv")
+    env.tracker.entries = [missing, replace(missing, path=path)]
+    assert env.client().get("/api/play/episode/1396/1/1").status_code == 200

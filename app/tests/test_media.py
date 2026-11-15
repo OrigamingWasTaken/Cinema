@@ -162,3 +162,17 @@ async def test_run_tool_cancelled_kills_the_child(spawned):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert await asyncio.wait_for(spawned[0].wait(), 2) == -9
+
+
+@pytest.mark.anyio
+async def test_second_probe_is_served_from_memory(tmp_path, monkeypatch):
+    f = tmp_path / "a.mkv"
+    f.write_bytes(b"x")
+    prober = Prober(tmp_path / "cache", fake_run([]))
+    info = await prober.probe(f)
+
+    def no_disk(cached):
+        raise AssertionError("read the JSON cache again")
+
+    monkeypatch.setattr(Prober, "_read", staticmethod(no_disk))
+    assert await prober.probe(f) == info

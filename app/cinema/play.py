@@ -1,5 +1,6 @@
 """Play finished films and episodes in the browser: file info, the file itself (mp4 only,
 with Range) and an HLS rendition of everything else."""
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
             if (e.show_tmdb_id == show_id and e.season == season and e.state == "done"
                     and e.episode <= number <= e.last_episode):
                 if e.path is None or not e.path.is_file():
-                    break
+                    continue
                 return Item(f"ep-{show_id}-{season}-{number}", e.path, e.title,
                             f"S{season:02d}E{number:02d}")
         raise NotFoundError()
@@ -111,7 +112,7 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
             return _bad_device()
         info = await probe(item)
         res = await stream(sessions.init((dev, item.item_id), item.path, info))
-        return res if isinstance(res, Response) else _send(res, "video/mp4")
+        return res if isinstance(res, Response) else await _send(res, "video/mp4")
 
     async def segment(item: Item, n: int, d: str | None):
         dev = device(d)
@@ -119,12 +120,12 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
             return _bad_device()
         info = await probe(item)
         res = await stream(sessions.segment((dev, item.item_id), item.path, info, n))
-        return res if isinstance(res, Response) else _send(res, "video/iso.segment")
+        return res if isinstance(res, Response) else await _send(res, "video/iso.segment")
 
     # ---- films
     @router.get("/play/movie/{tmdb_id}")
     async def movie_info(tmdb_id: int):
-        return await info_of(movie(tmdb_id), f"/api/play/movie/{tmdb_id}")
+        return await info_of(await asyncio.to_thread(movie, tmdb_id), f"/api/play/movie/{tmdb_id}")
 
     @router.get("/play/movie/{tmdb_id}/file")
     def movie_file(tmdb_id: int):
@@ -132,22 +133,22 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
 
     @router.get("/play/movie/{tmdb_id}/index.m3u8")
     async def movie_playlist(tmdb_id: int, d: str | None = Query(None)):
-        return await playlist(movie(tmdb_id), d)
+        return await playlist(await asyncio.to_thread(movie, tmdb_id), d)
 
     @router.get("/play/movie/{tmdb_id}/init.mp4")
     async def movie_init(tmdb_id: int, d: str | None = Query(None)):
-        return await init(movie(tmdb_id), d)
+        return await init(await asyncio.to_thread(movie, tmdb_id), d)
 
     @router.get("/play/movie/{tmdb_id}/seg/{n}.m4s")
     async def movie_segment(tmdb_id: int, n: int, d: str | None = Query(None)):
-        return await segment(movie(tmdb_id), n, d)
+        return await segment(await asyncio.to_thread(movie, tmdb_id), n, d)
 
     # ---- episodes
     ep = "/play/episode/{show_id}/{season}/{episode}"
 
     @router.get(ep)
     async def episode_info(show_id: int, season: int, episode: int):
-        return await info_of(resolve_episode(show_id, season, episode),
+        return await info_of(await asyncio.to_thread(resolve_episode, show_id, season, episode),
                              f"/api/play/episode/{show_id}/{season}/{episode}")
 
     @router.get(ep + "/file")
@@ -157,17 +158,17 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
     @router.get(ep + "/index.m3u8")
     async def episode_playlist(show_id: int, season: int, episode: int,
                                d: str | None = Query(None)):
-        return await playlist(resolve_episode(show_id, season, episode), d)
+        return await playlist(await asyncio.to_thread(resolve_episode, show_id, season, episode), d)
 
     @router.get(ep + "/init.mp4")
     async def episode_init(show_id: int, season: int, episode: int,
                            d: str | None = Query(None)):
-        return await init(resolve_episode(show_id, season, episode), d)
+        return await init(await asyncio.to_thread(resolve_episode, show_id, season, episode), d)
 
     @router.get(ep + "/seg/{n}.m4s")
     async def episode_segment(show_id: int, season: int, episode: int, n: int,
                               d: str | None = Query(None)):
-        return await segment(resolve_episode(show_id, season, episode), n, d)
+        return await segment(await asyncio.to_thread(resolve_episode, show_id, season, episode), n, d)
 
     return router
 
@@ -176,8 +177,8 @@ def _bad_device() -> Response:
     return JSONResponse({"error": "bad_device"}, status_code=400)
 
 
-def _send(path: Path, media_type: str) -> Response:
+async def _send(path: Path, media_type: str) -> Response:
     # The file can vanish between StreamSessions returning and now (restart or trim).
-    if not path.is_file():
+    if not await asyncio.to_thread(path.is_file):
         return Response(status_code=503, headers={"Retry-After": "1"})
     return FileResponse(path, media_type=media_type)

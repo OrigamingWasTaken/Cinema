@@ -108,26 +108,39 @@ class Prober:
         self.cache_dir = cache_dir
         self._run = run
         self._inflight: dict[str, asyncio.Task[MediaInfo]] = {}
+        self._memory: dict[str, MediaInfo] = {}
 
     async def probe(self, path: Path) -> MediaInfo:
         try:
-            st = path.stat()
+            st = await asyncio.to_thread(path.stat)
         except OSError as e:
             raise MediaError(f"cannot read {path.name}: {e.strerror}") from e
         key = hashlib.sha1(
             f"{_CACHE_VERSION}|{path}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()
+        known = self._memory.get(key)
+        if known is not None:
+            return known
         cached = self.cache_dir / f"{key}.json"
-        try:
-            data = json.loads(cached.read_text())
-            return MediaInfo(**{**data, "keyframes": tuple(data["keyframes"])})
-        except (OSError, ValueError, TypeError, KeyError):
-            pass
+        info = await asyncio.to_thread(self._read, cached)
+        if info is not None:
+            self._memory[key] = info
+            return info
         task = self._inflight.get(key)
         if task is None:
             task = asyncio.ensure_future(self._probe(path, cached))
             self._inflight[key] = task
             task.add_done_callback(lambda _t: self._inflight.pop(key, None))
-        return await asyncio.shield(task)
+        info = await asyncio.shield(task)
+        self._memory[key] = info
+        return info
+
+    @staticmethod
+    def _read(cached: Path) -> MediaInfo | None:
+        try:
+            data = json.loads(cached.read_text())
+            return MediaInfo(**{**data, "keyframes": tuple(data["keyframes"])})
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
 
     async def _probe(self, path: Path, cached: Path) -> MediaInfo:
         info_raw = await self._run(["ffprobe", "-v", "error", "-print_format", "json",
