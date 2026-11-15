@@ -61,6 +61,9 @@ class ShowInfo:
     airing: bool
     anime: bool
     tvdb_id: int | None
+    # (number, name, air_year) for TMDB seasons 1.., and (season, episode, "YYYY-MM-DD").
+    seasons: tuple[tuple[int, str, int | None], ...] = ()
+    next_episode: tuple[int, int, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -229,12 +232,23 @@ class TmdbClient:
             airing = bool(d.get("in_production")) or d.get("status") == "Returning Series"
             anime = (16 in [g.get("id") for g in d.get("genres") or []]
                      and "JP" in (d.get("origin_country") or []))
+            seasons = tuple(
+                (n, x.get("name") or "", _year(x.get("air_date")))
+                for x in d.get("seasons") or []
+                if isinstance(n := x.get("season_number"), int) and n >= 1)
+            nxt = d.get("next_episode_to_air") or {}
+            next_episode = None
+            if (isinstance(nxt.get("season_number"), int)
+                    and isinstance(nxt.get("episode_number"), int)
+                    and isinstance(nxt.get("air_date"), str) and nxt["air_date"]):
+                next_episode = (nxt["season_number"], nxt["episode_number"], nxt["air_date"])
             return ShowInfo(
                 d["id"], d["name"], _year(d.get("first_air_date")),
                 None if airing else _year(d.get("last_air_date")),
                 d.get("overview") or "", d.get("original_language") or "",
                 d.get("poster_path"), d.get("backdrop_path"), airing, anime,
-                (d.get("external_ids") or {}).get("tvdb_id") or None)
+                (d.get("external_ids") or {}).get("tvdb_id") or None,
+                seasons, next_episode)
         return await self._cached(("tv", tmdb_id), HOUR, fetch)
 
     async def search_all(self, query: str) -> SearchAll:

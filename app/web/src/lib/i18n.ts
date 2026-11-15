@@ -94,6 +94,7 @@ const en = {
   season_looking: "Looking for episodes…",
   season_not_found: "Couldn't find this season yet",
   season_upcoming: "Not out yet",
+  season_next_episode: "New episode {date}",
   not_available: "Not available",
   remove_season_confirm: "Remove this season from the TV?",
   episode_failed: "Couldn't download — looking for another version",
@@ -193,6 +194,7 @@ const fr: Record<Key, string> = {
   season_looking: "Recherche des épisodes…",
   season_not_found: "Saison introuvable pour l'instant",
   season_upcoming: "Pas encore sortie",
+  season_next_episode: "Nouvel épisode {date}",
   not_available: "Non disponible",
   remove_season_confirm: "Retirer cette saison de la TV ?",
   episode_failed: "Échec du téléchargement — recherche d'une autre version",
@@ -269,4 +271,19 @@ export function shortDate(iso: string | null): string | null {
   const parts = dates.formatToParts(at);
   const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${part("day")} ${part("month")} ${part("year")}`;
+}
+
+const days = new Intl.DateTimeFormat(lang === "fr" ? "fr-FR" : "en-US", {
+  weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
+});
+
+/** A "YYYY-MM-DD" air date as weekday, day and month ("Fri 20 Nov", "ven. 20 nov."); null if unreadable. */
+export function shortDay(day: string | null): string | null {
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const at = new Date(`${day}T00:00:00Z`);
+  if (Number.isNaN(at.getTime())) return null;
+  if (lang === "fr") return days.format(at);
+  const parts = days.formatToParts(at);
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("weekday")} ${part("day")} ${part("month")}`;
 }

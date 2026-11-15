@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import httpx
@@ -199,6 +200,54 @@ async def test_page_reports_season_monitored(env):
         [(1, "upcoming", True), (2, "none", False)]
     page = await env.remove_season(TMDB, 1)
     assert page["seasons"][0]["monitored"] is False
+
+
+def with_seasons(env, seasons, next_episode=None):
+    env.tmdb_fake.shows[TMDB] = replace(
+        info(), seasons=tuple(seasons), next_episode=next_episode)
+
+
+@pytest.mark.anyio
+async def test_page_labels_and_next_air_date_when_counts_match(env):
+    with_seasons(env, [(1, "Origins", 2008), (2, "STEEL BALL RUN", 2026)],
+                 (2, 10, "2026-11-20"))
+    env.fake.series[5] = series_dict(monitored=True)
+    env.fake.episodes = [ep_dict(101, 1), ep_dict(201, 2)]
+    s1, s2 = (await env.page(TMDB))["seasons"]
+    assert (s1["label"], s1["year"], s1["next_air_date"]) == ("Origins", 2008, None)
+    assert (s2["label"], s2["year"], s2["next_air_date"]) == \
+        ("STEEL BALL RUN", 2026, "2026-11-20")
+    # Lookup-only series gets the same.
+    env.fake.series.clear()
+    env.fake.lookup[TVDB] = lookup_result()
+    s1, s2 = (await env.page(TMDB))["seasons"]
+    assert (s2["label"], s2["year"], s2["next_air_date"]) == \
+        ("STEEL BALL RUN", 2026, "2026-11-20")
+
+
+@pytest.mark.anyio
+async def test_page_generic_season_name_hidden(env):
+    with_seasons(env, [(1, "Season 1", 2008), (2, "saison 2", 2010)])
+    env.fake.lookup[TVDB] = lookup_result()
+    s1, s2 = (await env.page(TMDB))["seasons"]
+    assert (s1["label"], s1["year"]) == (None, 2008)
+    assert (s2["label"], s2["year"]) == (None, 2010)
+
+
+@pytest.mark.anyio
+async def test_page_labels_hidden_when_season_counts_differ(env):
+    with_seasons(env, [(1, "Origins", 2008)], (1, 3, "2026-11-20"))
+    env.fake.series[5] = series_dict(monitored=True)
+    env.fake.episodes = [ep_dict(101, 1), ep_dict(201, 2)]
+    seasons = (await env.page(TMDB))["seasons"]
+    assert [(s["label"], s["next_air_date"]) for s in seasons] == [(None, None)] * 2
+    # Year falls back to the earliest Sonarr air date when episodes are known.
+    assert seasons[0]["year"] == int(PAST[:4])
+    env.fake.series.clear()
+    env.fake.lookup[TVDB] = lookup_result()
+    seasons = (await env.page(TMDB))["seasons"]
+    assert [(s["label"], s["year"], s["next_air_date"]) for s in seasons] == \
+        [(None, None, None)] * 2
 
 
 @pytest.mark.anyio

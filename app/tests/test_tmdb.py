@@ -244,6 +244,25 @@ async def test_tv_parses_airing_anime_and_tvdb():
 
 
 @pytest.mark.anyio
+async def test_tv_parses_seasons_and_next_episode():
+    names = ["Specials", "Phantom Blood", "Battle Tendency", "Stardust Crusaders",
+             "Diamond Is Unbreakable", "Golden Wind", "STEEL BALL RUN"]
+    years = [None, "2012-10-06", "2012-12-01", "2014-04-04", "2016-04-01", "2018-10-05",
+             "2026-09-01"]
+    seasons = [{"season_number": i, "name": n, "air_date": y}
+               for i, (n, y) in enumerate(zip(names, years))]
+    info = await make(lambda r: httpx.Response(200, json={
+        **SHOW, "seasons": seasons,
+        "next_episode_to_air": {"season_number": 6, "episode_number": 10,
+                                "air_date": "2026-11-20"}})).tv(1396)
+    assert len(info.seasons) == 6 and info.seasons[0][0] == 1
+    assert info.seasons[5] == (6, "STEEL BALL RUN", 2026)
+    assert info.next_episode == (6, 10, "2026-11-20")
+    bare = await make(lambda r: httpx.Response(200, json=SHOW)).tv(1396)
+    assert bare.seasons == () and bare.next_episode is None
+
+
+@pytest.mark.anyio
 async def test_tv_ended_has_end_year():
     info = await make(lambda r: httpx.Response(200, json=SHOW)).tv(1396)
     assert info.airing is False and info.end_year == 2013

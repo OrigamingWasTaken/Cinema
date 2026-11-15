@@ -1,7 +1,7 @@
 <script lang="ts">
   import { slide } from "svelte/transition";
   import type { EpisodeView, SeasonView } from "../lib/api";
-  import { shortDate, t, type StringKey } from "../lib/i18n";
+  import { shortDate, shortDay, t, type StringKey } from "../lib/i18n";
   import { ms } from "../lib/motion";
   import Icon from "./Icon.svelte";
   import Spinner from "./Spinner.svelte";
@@ -33,6 +33,9 @@
   const removable = $derived(season.on_tv > 0 || season.monitored);
   const episodes = $derived(season.episodes?.length ? season.episodes : null);
   const listId = $derived(`season-${season.number}-episodes`);
+
+  const sub = $derived([season.label, season.year].filter(Boolean).join(" · "));
+  const nextDay = $derived(shortDay(season.next_air_date));
 
   const stateLine = $derived.by((): string | null => {
     switch (season.state) {
@@ -67,6 +70,13 @@
     </button>
   {:else}
     <div class="head"><span class="name">{t("season_n", { n: season.number })}</span></div>
+  {/if}
+
+  {#if sub || nextDay}
+    <p class="sub">
+      {#if sub}<span>{sub}</span>{/if}
+      {#if nextDay}<span class="next">{t("season_next_episode", { date: nextDay })}</span>{/if}
+    </p>
   {/if}
 
   {#if stateLine || (removable && !confirming)}
@@ -157,6 +167,9 @@
   .name { flex: 1; min-width: 0; font: 600 19px/1.2 var(--serif); }
   .chevron { flex: none; color: var(--usher); transform: rotate(90deg); transition: transform 0.2s ease; }
   .chevron.open { transform: rotate(-90deg); }
+
+  .sub { display: flex; flex-direction: column; gap: 1px; margin: -2px 16px 6px; font-size: 14px; line-height: 1.3; color: var(--usher); }
+  .sub .next { color: var(--tungsten); font-weight: 550; }
 
   .status { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 16px; margin-top: -6px; }
   .state {

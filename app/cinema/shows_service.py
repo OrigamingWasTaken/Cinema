@@ -4,6 +4,7 @@ Sonarr owns the show (what is monitored, searched and imported); this service dr
 on behalf of the UI and reports each season's state for the show page.
 """
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -83,6 +84,31 @@ def _episode_state(ep: SonarrEpisode, queued: set[int], now: float) -> str:
     if not _is_aired(ep, now):
         return "not_aired"
     return "missing"
+
+
+_GENERIC_SEASON = re.compile(r"^(Season|Saison) \d+$", re.IGNORECASE)
+
+
+def _tmdb_labels(info: ShowInfo, count: int) -> dict[int, tuple[str | None, int | None]]:
+    """TMDB's (label, year) per season number, only when TMDB and Sonarr agree on how many
+    seasons there are: the numbering can differ, so a mismatch means no name is safe."""
+    if len(info.seasons) != count:
+        return {}
+    return {n: (None if _GENERIC_SEASON.match(name.strip()) or not name.strip() else name, year)
+            for n, name, year in info.seasons}
+
+
+def _naming(info: ShowInfo, names: dict, number: int,
+            episodes: list[SonarrEpisode] | None = None) -> dict:
+    """label, year and next_air_date of one season (see _tmdb_labels for the guard)."""
+    if names:
+        label, year = names.get(number, (None, None))
+        nxt = info.next_episode
+        return {"label": label, "year": year,
+                "next_air_date": nxt[2] if nxt and nxt[0] == number else None}
+    dates = [e.air_date_utc[:4] for e in episodes or [] if e.air_date_utc]
+    year = min(dates) if dates and min(dates).isdigit() else None
+    return {"label": None, "year": int(year) if year else None, "next_air_date": None}
 
 
 def _has_files(s: SonarrSeries) -> bool:
@@ -166,10 +192,13 @@ class ShowsService:
             found = await self.sonarr.lookup_tvdb(info.tvdb_id)
             if found is None:
                 return unavailable
+            numbers = [s for s in found.seasons if s.number != 0]
+            names = _tmdb_labels(info, len(numbers))
             seasons = [{"number": s.number, "state": "none", "on_tv": 0,
                         "total": s.episode_count, "aired": 0, "downloading": 0,
-                        "monitored": False, "episodes": None}
-                       for s in found.seasons if s.number != 0]
+                        "monitored": False, "episodes": None,
+                        **_naming(info, names, s.number)}
+                       for s in numbers]
             return {"show": show, "available": True, "following": False, "seasons": seasons}
 
         now = self.now()
@@ -177,6 +206,7 @@ class ShowsService:
         queued = {q.episode_id for q in await self.sonarr.queue()
                   if q.series_id == series.id}
         seasons = []
+        names = _tmdb_labels(info, sum(1 for s in series.seasons if s.number != 0))
         for s in series.seasons:
             if s.number == 0:
                 continue
@@ -186,6 +216,7 @@ class ShowsService:
                 eps, monitored=s.monitored, queued=queued, number=s.number, now=now,
                 requested_at=self.store.season_requested_at(tmdb_id, s.number))
             state["monitored"] = s.monitored
+            state.update(_naming(info, names, s.number, eps))
             state["episodes"] = [{"number": e.number, "title": e.title,
                                   "air_date": e.air_date_utc,
                                   "state": _episode_state(e, queued, now)} for e in eps]

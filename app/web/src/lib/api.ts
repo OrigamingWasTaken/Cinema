@@ -129,6 +129,11 @@ export interface SeasonView {
   monitored: boolean;
   /** null until the show is in the library (no episode list yet). */
   episodes: EpisodeView[] | null;
+  /** TMDB's season name, when it is trustworthy and not just "Season N". */
+  label: string | null;
+  year: number | null;
+  /** "YYYY-MM-DD" of the next episode, on the season it belongs to. */
+  next_air_date: string | null;
 }
 
 export interface ShowInfo {
