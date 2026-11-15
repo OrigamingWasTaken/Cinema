@@ -80,6 +80,26 @@ const en = {
   library_shows_empty_title: "No shows on the TV yet",
   library_shows_empty: "Shows you get show up here once their first episodes are on the TV.",
   find_show: "Find a show",
+
+  // Added with the show page.
+  get_season: "Get season",
+  get_rest: "Get the rest",
+  try_again: "Try again",
+  follow: "Follow",
+  following: "Following",
+  unfollow: "Unfollow",
+  season_n: "Season {n}",
+  season_downloading: "Downloading {n} of {m} episodes",
+  season_partial: "{n} of {m} on the TV",
+  season_looking: "Looking for episodes…",
+  season_not_found: "Couldn't find this season yet",
+  season_upcoming: "Not out yet",
+  not_available: "Not available",
+  remove_season_confirm: "Remove this season from the TV?",
+  episode_failed: "Couldn't download — looking for another version",
+  episode_n: "Episode {n}",
+  episode_downloading: "Downloading",
+  episode_not_aired: "Not out yet",
 };
 
 type Key = keyof typeof en;
@@ -160,6 +180,25 @@ const fr: Record<Key, string> = {
   library_shows_empty_title: "Aucune série sur la TV pour l'instant",
   library_shows_empty: "Les séries que vous prenez apparaissent ici dès que leurs premiers épisodes sont sur la TV.",
   find_show: "Trouver une série",
+
+  get_season: "Télécharger la saison",
+  get_rest: "Télécharger la suite",
+  try_again: "Réessayer",
+  follow: "Suivre",
+  following: "Suivie",
+  unfollow: "Ne plus suivre",
+  season_n: "Saison {n}",
+  season_downloading: "{n} épisodes sur {m} en téléchargement",
+  season_partial: "{n} sur {m} sur la TV",
+  season_looking: "Recherche des épisodes…",
+  season_not_found: "Saison introuvable pour l'instant",
+  season_upcoming: "Pas encore sortie",
+  not_available: "Non disponible",
+  remove_season_confirm: "Retirer cette saison de la TV ?",
+  episode_failed: "Échec du téléchargement — recherche d'une autre version",
+  episode_n: "Épisode {n}",
+  episode_downloading: "En téléchargement",
+  episode_not_aired: "Pas encore sorti",
 };
 
 export const STRINGS = { en, fr };
@@ -201,4 +240,33 @@ export function runtimeText(minutes: number | null): string | null {
   if (!minutes) return null;
   if (minutes < 60) return t("minutes", { m: minutes });
   return t("runtime", { h: Math.floor(minutes / 60), m: String(minutes % 60).padStart(2, "0") });
+}
+
+/** "S02E03": Sonarr's season and episode numbers, two digits each. */
+export function episodeCode(season: number, episode: number): string {
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `S${two(season)}E${two(episode)}`;
+}
+
+/** "2016–2022", "2016–" while airing, "2024" for a single year. */
+export function yearsText(year: number | null, endYear: number | null, airing: boolean): string | null {
+  if (!year) return null;
+  if (airing) return `${year}–`;
+  return endYear && endYear !== year ? `${year}–${endYear}` : String(year);
+}
+
+// en-GB would write "Sept"; English takes en-US's month names in day-month-year order.
+const dates = new Intl.DateTimeFormat(lang === "fr" ? "fr-FR" : "en-US", {
+  day: "numeric", month: "short", year: "numeric",
+});
+
+/** An ISO 8601 time as a short local date ("12 Mar 2026", "12 mars 2026"); null if unreadable. */
+export function shortDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return null;
+  if (lang === "fr") return dates.format(at);
+  const parts = dates.formatToParts(at);
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("day")} ${part("month")} ${part("year")}`;
 }

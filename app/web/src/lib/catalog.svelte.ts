@@ -1,5 +1,6 @@
 // Everything /api/home knows: the rows on Home, what is on the server, free space.
-// One poller for the whole app refreshes it every 3 s while a film is getting ready.
+// One poller for the whole app refreshes it every 3 s while a film or an episode is
+// getting ready.
 // /api/shows (the Shows tab and the Library's shows) has its own store below.
 import {
   api, isActive, type Card, type EpisodeDownload, type HomeData, type LibraryItem, type ShowCard,
@@ -24,6 +25,9 @@ class Catalog {
   active = $derived(this.library.filter(isActive));
   done = $derived(this.library.filter((item) => item.state === "done"));
   broken = $derived(this.library.filter((item) => item.state === "failed"));
+  /** Films and episodes getting ready (the Downloads badge). /api/home lists only
+   *  active episodes in `episodes`. */
+  activeCount = $derived(this.active.length + this.episodes.length);
 
   #timer: ReturnType<typeof setTimeout> | null = null;
   #inFlight: Promise<void> | null = null;
@@ -82,7 +86,7 @@ class Catalog {
 
   /** At most one pending tick; none while nothing is getting ready or the app is hidden. */
   #schedule() {
-    if (this.#timer || this.#inFlight || document.hidden || !this.active.length) return;
+    if (this.#timer || this.#inFlight || document.hidden || !this.activeCount) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
       this.refresh();

@@ -219,7 +219,10 @@ export async function api<T>(path: string, { method = "GET", body, timeout = 200
   }
 }
 
-export const isActive = (item: LibraryItem | null | undefined): boolean =>
+/** What Status shows: a film on the server, or an episode being downloaded. */
+export type Progress = Pick<LibraryItem, "state" | "percent" | "eta_s" | "may_buffer">;
+
+export const isActive = (item: Progress | null | undefined): boolean =>
   !!item && (item.state === "preparing" || item.state === "ready");
 
 const IMAGE = "https://image.tmdb.org/t/p/";

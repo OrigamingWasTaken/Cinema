@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { isActive, type LibraryItem } from "../lib/api";
+  import { isActive, type Progress } from "../lib/api";
   import { downloadingLine, t } from "../lib/i18n";
   import Icon from "./Icon.svelte";
   import Spinner from "./Spinner.svelte";
 
-  // The family-facing status of a film on the server: one line of copy, then the
-  // progress for a film that is still coming in.
-  let { item, compact = false }: { item: LibraryItem; compact?: boolean } = $props();
+  // The family-facing status of a film (or an episode) on the server: one line of
+  // copy, then the progress while it is still coming in.
+  let { item, compact = false }: { item: Progress; compact?: boolean } = $props();
 </script>
 
 <div class="status status--{item.state}" class:compact>

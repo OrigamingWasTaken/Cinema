@@ -27,14 +27,14 @@
        onclick={(event) => tap(event, tab)}>
       <span class="glyph">
         <Icon name={tab} size={24} stroke={current ? 2.3 : 1.8} />
-        {#if tab === "downloads" && catalog.active.length}
-          <span class="count" aria-hidden="true">{catalog.active.length}</span>
+        {#if tab === "downloads" && catalog.activeCount}
+          <span class="count" aria-hidden="true">{catalog.activeCount}</span>
         {/if}
       </span>
       <span class="label">
         {t(LABELS[tab])}
-        {#if tab === "downloads" && catalog.active.length}
-          <span class="sr-only">({catalog.active.length})</span>
+        {#if tab === "downloads" && catalog.activeCount}
+          <span class="sr-only">({catalog.activeCount})</span>
         {/if}
       </span>
     </a>

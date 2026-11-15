@@ -4,10 +4,16 @@
   import Icon from "../components/Icon.svelte";
   import Poster from "../components/Poster.svelte";
   import Status from "../components/Status.svelte";
+  import type { EpisodeDownload } from "../lib/api";
   import { catalog } from "../lib/catalog.svelte";
-  import { formatNumber, t } from "../lib/i18n";
+  import { episodeCode, formatNumber, t } from "../lib/i18n";
 
   let { active }: { active: boolean } = $props();
+
+  const label = (ep: EpisodeDownload) => `${ep.show_title} · ${episodeCode(ep.season, ep.episode)}`;
+  const key = (ep: EpisodeDownload) => `${ep.show_id ?? ep.show_title}/${ep.season}/${ep.episode}`;
+  const downloading = $derived(catalog.active.length + catalog.episodes.length > 0);
+  const broken = $derived(catalog.broken.length + catalog.episodesFailed.length > 0);
 
   const used = $derived(catalog.disk && catalog.disk.total_bytes
     ? 1 - catalog.disk.free_bytes / catalog.disk.total_bytes : null);
@@ -19,11 +25,11 @@
   {#if catalog.failed}
     <ErrorBlock retry={() => catalog.refresh()} />
   {:else if catalog.loaded}
-    {#if !catalog.active.length && !catalog.broken.length}
+    {#if !downloading && !broken}
       <EmptyState icon="downloads" title={t("downloads_empty_title")} text={t("downloads_empty")} />
     {/if}
 
-    {#if catalog.active.length}
+    {#if downloading}
       <section class="group">
         <h2 class="section-title">{t("downloads_active")}</h2>
         <ul class="list">
@@ -38,11 +44,23 @@
               </a>
             </li>
           {/each}
+          {#each catalog.episodes as ep (key(ep))}
+            <li>
+              <svelte:element this={ep.show_id != null ? "a" : "div"} class="row"
+                              href={ep.show_id != null ? `#/show/${ep.show_id}` : undefined}>
+                <span class="thumb"><Poster path={ep.poster_path} title={ep.show_title} /></span>
+                <span class="body">
+                  <span class="title">{label(ep)}</span>
+                  <Status item={ep} compact />
+                </span>
+              </svelte:element>
+            </li>
+          {/each}
         </ul>
       </section>
     {/if}
 
-    {#if catalog.broken.length}
+    {#if broken}
       <section class="group">
         <h2 class="section-title">{t("downloads_failed")}</h2>
         <ul class="list">
@@ -55,6 +73,18 @@
                   <span class="retry">{t("try_another")}<Icon name="chevron" size={16} stroke={2.4} /></span>
                 </span>
               </a>
+            </li>
+          {/each}
+          {#each catalog.episodesFailed as ep (key(ep))}
+            <li>
+              <svelte:element this={ep.show_id != null ? "a" : "div"} class="row row--failed"
+                              href={ep.show_id != null ? `#/show/${ep.show_id}` : undefined}>
+                <span class="thumb"><Poster path={ep.poster_path} title={ep.show_title} /></span>
+                <span class="body">
+                  <span class="title">{label(ep)}</span>
+                  <span class="looking">{t("episode_failed")}</span>
+                </span>
+              </svelte:element>
             </li>
           {/each}
         </ul>
@@ -108,6 +138,8 @@
     min-height: 24px;
   }
   .row--failed .thumb { opacity: 0.6; filter: grayscale(0.6); }
+  /* An episode that failed: Sonarr is already looking for another version. */
+  .looking { color: var(--failed); font-size: 14px; font-weight: 550; line-height: 1.35; }
   .disk {
     margin: 36px var(--gutter) 0;
     display: flex;
