@@ -25,7 +25,7 @@
     const id = hero.id;
     const outcome = await getRecommended(id);
     // Only open the film if the family is still looking at Home.
-    const onHome = router.route.tab === "home" && router.route.movie == null;
+    const onHome = router.route.tab === "home" && router.route.movie == null && router.route.browse == null;
     if (outcome === "none" && onHome) {
       // Nothing good to recommend: open the film with its version list.
       navigate(`#/movie/${id}`);

@@ -60,6 +60,16 @@ const en = {
   choose_version: "Choose a version",
   no_versions: "No versions found yet. Try again later.",
   minutes: "{m} min",
+
+  // Added with catalog search.
+  films: "Films",
+  people: "People",
+  studios: "Studios",
+  collections: "Collections",
+  genres: "Genres",
+  load_more: "Load more",
+  films_with: "Films with {name}",
+  browse_empty: "No films here yet",
 };
 
 type Key = keyof typeof en;
@@ -122,6 +132,15 @@ const fr: Record<Key, string> = {
   choose_version: "Choisir une version",
   no_versions: "Aucune version trouvée pour l'instant. Réessayez plus tard.",
   minutes: "{m} min",
+
+  films: "Films",
+  people: "Personnes",
+  studios: "Studios",
+  collections: "Collections",
+  genres: "Genres",
+  load_more: "Plus de résultats",
+  films_with: "Films avec {name}",
+  browse_empty: "Aucun film ici pour l'instant",
 };
 
 export const STRINGS = { en, fr };

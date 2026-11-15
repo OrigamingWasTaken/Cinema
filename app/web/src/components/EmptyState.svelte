@@ -3,13 +3,13 @@
   import Icon, { type IconName } from "./Icon.svelte";
 
   let { title, text, icon, children }:
-    { title: string; text: string; icon?: IconName; children?: Snippet } = $props();
+    { title: string; text?: string; icon?: IconName; children?: Snippet } = $props();
 </script>
 
 <div class="empty">
   {#if icon}<span class="glyph"><Icon name={icon} size={28} stroke={1.7} /></span>{/if}
   <p class="title">{title}</p>
-  <p class="text">{text}</p>
+  {#if text}<p class="text">{text}</p>{/if}
   {#if children}<div class="action">{@render children()}</div>{/if}
 </div>
 

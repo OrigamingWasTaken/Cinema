@@ -3,9 +3,11 @@
   import EmptyState from "../components/EmptyState.svelte";
   import ErrorBlock from "../components/ErrorBlock.svelte";
   import Icon from "../components/Icon.svelte";
+  import PersonRow from "../components/PersonRow.svelte";
   import PosterGrid from "../components/PosterGrid.svelte";
   import Spinner from "../components/Spinner.svelte";
-  import { api, ApiError, type Card } from "../lib/api";
+  import TileRow from "../components/TileRow.svelte";
+  import { api, ApiError, type Card, type Genre, type SearchData } from "../lib/api";
   import { catalog } from "../lib/catalog.svelte";
   import { t } from "../lib/i18n";
   import { navigate, rememberQuery, router } from "../lib/router.svelte";
@@ -16,7 +18,7 @@
 
   let input: HTMLInputElement | undefined = $state();
   let text = $state(router.route.q);
-  let results = $state<Card[] | null>(null);
+  let results = $state<SearchData | null>(null);
   let resultsFor = $state("");
   let loading = $state(false);
   let failed = $state(false);
@@ -26,6 +28,26 @@
   const query = $derived(text.trim());
   const cards = (list: Card[]) =>
     list.map((c) => ({ id: c.id, title: c.title, year: c.year, path: c.poster_path, state: catalog.state(c) }));
+  const nothingFound = $derived(
+    !!results && !results.films.length && !results.people.length && !results.studios.length && !results.collections.length);
+
+  // Genre chips for before you type. Loaded once; a failure just leaves them out
+  // until the tab is opened again or the field is cleared.
+  let genres = $state<Genre[] | null>(null);
+  let genresLoading = false;
+  async function loadGenres() {
+    if (genresLoading) return;
+    genresLoading = true;
+    try {
+      genres = (await api<{ genres: Genre[] }>("/genres")).genres;
+    } catch {
+      // Popular right now still shows; the chips come back next time.
+    }
+    genresLoading = false;
+  }
+  $effect(() => {
+    if (active && !query && !genres) untrack(loadGenres);
+  });
 
   async function run(q: string) {
     request?.abort();
@@ -40,8 +62,7 @@
     loading = true;
     failed = false;
     try {
-      const data = await api<{ results: Card[] }>(`/search?q=${encodeURIComponent(q)}`, { signal: mine.signal });
-      results = data.results;
+      results = await api<SearchData>(`/search?q=${encodeURIComponent(q)}`, { signal: mine.signal });
       resultsFor = q;
     } catch (err) {
       if (err instanceof ApiError && err.status === -1) return; // superseded
@@ -129,12 +150,40 @@
   {#if failed}
     <ErrorBlock retry={() => run(query)} />
   {:else if query && results && resultsFor}
-    {#if results.length}
-      <PosterGrid items={cards(results)} />
-    {:else}
+    {#if nothingFound}
       <EmptyState icon="search" title={t("no_results")} text={t("no_results_hint")} />
+    {:else}
+      <div class="results">
+        {#if results.films.length}
+          <section class="films">
+            <h2 class="section-title">{t("films")}</h2>
+            <PosterGrid items={cards(results.films)} />
+          </section>
+        {/if}
+        {#if results.people.length}
+          <PersonRow people={results.people} />
+        {/if}
+        {#if results.studios.length}
+          <TileRow title={t("studios")} variant="logo"
+                   tiles={results.studios.map((s) => ({ id: s.id, name: s.name, href: `#/studio/${s.id}`, path: s.logo_path }))} />
+        {/if}
+        {#if results.collections.length}
+          <TileRow title={t("collections")} variant="poster"
+                   tiles={results.collections.map((c) => ({ id: c.id, name: c.name, href: `#/collection/${c.id}`, path: c.poster_path }))} />
+        {/if}
+      </div>
     {/if}
   {:else if !query}
+    {#if genres?.length}
+      <section class="genres">
+        <h2 class="section-title">{t("genres")}</h2>
+        <ul class="chips">
+          {#each genres as genre (genre.id)}
+            <li><a class="chip" href="#/genre/{genre.id}">{genre.name}</a></li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
     {#if catalog.popular.length}
       <h2 class="section-title">{t("popular_now")}</h2>
       <PosterGrid items={cards(catalog.popular)} />
@@ -184,4 +233,31 @@
   .clear { border: 0; background: none; padding: 0; color: var(--usher); cursor: pointer; border-radius: 50%; }
   .clear:active { background: rgb(255 255 255 / 0.08); }
   .section-title { margin-top: 10px; }
+  /* Whichever group comes first sits right under the field. */
+  .results > :global(:first-child) { margin-top: 10px; }
+  .results > .films:first-child { margin-top: 0; }
+  .genres { margin-bottom: 28px; }
+  .chips {
+    list-style: none;
+    margin: 0;
+    padding: 0 var(--gutter);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 16px;
+    border-radius: 999px;
+    background: var(--velvet);
+    box-shadow: inset 0 0 0 1px var(--line);
+    font-size: 15px;
+    font-weight: 550;
+    -webkit-touch-callout: none;
+    transition: transform 0.15s ease, background-color 0.2s ease;
+  }
+  .chip:active { transform: scale(0.96); background: var(--aisle); }
+  @media (prefers-reduced-motion: reduce) { .chip { transition: none; } }
 </style>

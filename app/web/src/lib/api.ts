@@ -11,6 +11,45 @@ export interface Card {
   in_library: boolean;
 }
 
+export interface PersonRef {
+  id: number;
+  name: string;
+  profile_path: string | null;
+  known_for_department: string | null;
+}
+
+export interface StudioRef {
+  id: number;
+  name: string;
+  logo_path: string | null;
+}
+
+export interface CollectionRef {
+  id: number;
+  name: string;
+  poster_path: string | null;
+  backdrop_path?: string | null;
+}
+
+export interface Genre {
+  id: number;
+  name: string;
+}
+
+export interface SearchData {
+  films: Card[];
+  people: PersonRef[];
+  studios: StudioRef[];
+  collections: CollectionRef[];
+}
+
+/** One page of a studio's or a genre's films. */
+export interface FilmPage {
+  films: Card[];
+  page: number;
+  total_pages: number;
+}
+
 export interface LibraryItem {
   tmdb_id: number;
   title: string;
@@ -105,4 +144,6 @@ export const isActive = (item: LibraryItem | null | undefined): boolean =>
 
 const IMAGE = "https://image.tmdb.org/t/p/";
 export const posterUrl = (path: string) => `${IMAGE}w342${path}`;
+export const profileUrl = (path: string, size: "w185" | "h632" = "w185") => `${IMAGE}${size}${path}`;
+export const logoUrl = (path: string) => `${IMAGE}w185${path}`;
 export const backdropUrl = (path: string, size: "w780" | "w1280" = "w1280") => `${IMAGE}${size}${path}`;

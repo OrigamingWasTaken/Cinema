@@ -10,7 +10,7 @@
   import { clearMessage, flow, forgetReleases, getRecommended } from "../lib/flows.svelte";
   import { runtimeText, t } from "../lib/i18n";
   import { ms } from "../lib/motion";
-  import { goBack, navigate, router } from "../lib/router.svelte";
+  import { browseHref, goBack, navigate, router, tabHref } from "../lib/router.svelte";
   import MoreSheet from "./MoreSheet.svelte";
 
   // The film page, pushed over the current tab. What is on the server comes from the
@@ -28,7 +28,8 @@
   const current = $derived(flow(id));
   const canGet = $derived(!item || item.state === "failed");
   const meta = $derived(movie ? [movie.year, runtimeText(movie.runtime)].filter(Boolean).map(String) : []);
-  const tabHome = $derived(`#${router.route.tab === "home" ? "/" : `/${router.route.tab}`}`);
+  // Back from a film opened by a link: to the page it sits on.
+  const backHref = $derived(router.route.browse ? browseHref(router.route.browse) : tabHref(router.route.tab));
 
   async function load() {
     loadFailed = false;
@@ -109,7 +110,7 @@
 {/snippet}
 
 <article class="movie" in:fade={{ duration: ms(200) }}>
-  <button class="back" type="button" aria-label={t("back")} onclick={() => goBack(tabHome)}>
+  <button class="back" type="button" aria-label={t("back")} onclick={() => goBack(backHref)}>
     <Icon name="back" size={22} stroke={2.4} />
   </button>
 

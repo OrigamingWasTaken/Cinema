@@ -13,7 +13,7 @@
     event.preventDefault();
     selectTab(tab);
     // Focus inside the tap itself: iOS only raises the keyboard from a user gesture.
-    if (tab === "search" && router.route.movie == null) {
+    if (tab === "search" && router.route.movie == null && router.route.browse == null) {
       const input = document.getElementById("search-input") as HTMLInputElement | null;
       if (input && !input.value) input.focus({ preventScroll: true });
     }

@@ -1,26 +1,40 @@
-// A tiny hash router. Tabs and the film page live in the URL, so the phone's back
-// button (and the iOS swipe) behave like in a native app.
+// A tiny hash router. Tabs and the pages pushed over them live in the URL, so the
+// phone's back button (and the iOS swipe) behave like in a native app.
 //
 //   #/            Home           #/movie/123       film page, over the current tab
 //   #/search?q=   Search         #/movie/123/more  the More versions sheet
-//   #/library     Library
-//   #/downloads   Downloads
+//   #/library     Library        #/person/31       a person's films, over the current tab
+//   #/downloads   Downloads      #/studio/3        (also #/collection/10, #/genre/16)
+//
+// A film opened from one of those pages sits over it: back returns to that page.
 import { flushSync, tick } from "svelte";
 
 export type Tab = "home" | "search" | "library" | "downloads";
 export const TABS: Tab[] = ["home", "search", "library", "downloads"];
 
+export type BrowseKind = "person" | "studio" | "collection" | "genre";
+
+/** A page of films (a person, a studio, a collection or a genre). */
+export interface Browse {
+  kind: BrowseKind;
+  id: number;
+}
+
 export interface Route {
   tab: Tab;
+  /** The browse page shown, or the one under the film page. */
+  browse: Browse | null;
   movie: number | null;
   sheet: boolean;
   q: string;
 }
 
-/** What we keep in history.state: which tab a film page sits on, and how deep it is. */
-interface Entry {
+/** Where a pushed page sits: its tab, and the browse page under a film page. */
+type Base = Pick<Route, "tab" | "browse">;
+
+/** What we keep in history.state: where a pushed page sits, and how deep it is. */
+interface Entry extends Base {
   inApp: true;
-  tab: Tab;
   depth: number;
 }
 
@@ -32,24 +46,39 @@ const TAB_PATHS: Record<Tab, string> = {
 };
 
 export const tabHref = (tab: Tab) => TAB_PATHS[tab];
+export const browseHref = (page: Browse) => `#/${page.kind}/${page.id}`;
 
-function parse(hash: string, fallbackTab: Tab): Route {
+/** A tab itself, with nothing pushed over it. */
+const onTab = (r: Route) => r.movie == null && r.browse == null;
+
+function parse(hash: string, base: Base): Route {
   const [path, query = ""] = (hash.replace(/^#/, "") || "/").split("?");
   const movie = path.match(/^\/movie\/(\d+)(\/more)?\/?$/);
-  if (movie) return { tab: fallbackTab, movie: Number(movie[1]), sheet: Boolean(movie[2]), q: "" };
+  if (movie) return { ...base, movie: Number(movie[1]), sheet: Boolean(movie[2]), q: "" };
+  const page = path.match(/^\/(person|studio|collection|genre)\/(\d+)\/?$/);
+  if (page) {
+    const browse = { kind: page[1] as BrowseKind, id: Number(page[2]) };
+    return { tab: base.tab, browse, movie: null, sheet: false, q: "" };
+  }
   const tab = (TABS.find((name) => name !== "home" && path === `/${name}`) ?? "home") as Tab;
   const q = tab === "search" ? (new URLSearchParams(query).get("q") ?? "") : "";
-  return { tab, movie: null, sheet: false, q };
+  return { tab, browse: null, movie: null, sheet: false, q };
 }
 
 const entry = (): Partial<Entry> => (history.state && history.state.inApp ? history.state : {});
+// A plain copy: history.state cannot hold the route's reactive proxy.
+const baseOf = (r: Route): Base => ({ tab: r.tab, browse: r.browse && { kind: r.browse.kind, id: r.browse.id } });
+
+// A browse page opened from a link belongs with Search, where those pages come from.
+const startTab: Tab = entry().tab ?? (/^#\/(person|studio|collection|genre)\//.test(location.hash) ? "search" : "home");
 
 export const router = $state<{ route: Route }>({
-  route: parse(location.hash, (entry().tab as Tab) ?? "home"),
+  route: parse(location.hash, { tab: startTab, browse: entry().browse ?? null }),
 });
 
-/** The view whose scroll position we remember: a tab, or one film page. */
-const viewKey = (r: Route) => (r.movie != null ? `movie/${r.movie}` : r.tab);
+/** The view whose scroll position we remember: a tab, a browse page or one film page. */
+const viewKey = (r: Route) =>
+  r.movie != null ? `movie/${r.movie}` : r.browse ? `${r.browse.kind}/${r.browse.id}` : r.tab;
 const scrollMemory = new Map<string, number>();
 
 async function apply(next: Route, popped: boolean) {
@@ -59,17 +88,17 @@ async function apply(next: Route, popped: boolean) {
   const after = viewKey(next);
   if (after === before) return;
   await tick();
-  // Tabs always come back where you left them; a film page starts at the top
+  // Tabs always come back where you left them; a pushed page starts at the top
   // unless you return to it with the back button.
-  const keep = next.movie == null || popped;
+  const keep = onTab(next) || popped;
   window.scrollTo(0, keep ? (scrollMemory.get(after) ?? 0) : 0);
 }
 
 export function navigate(href: string, { replace = false } = {}) {
   const current = entry();
-  const next = parse(href, router.route.tab);
-  const depth = next.movie == null ? 0 : (current.depth ?? 0) + (replace ? 0 : 1);
-  const state: Entry = { inApp: true, tab: next.tab, depth: next.movie == null ? 0 : depth };
+  const next = parse(href, baseOf(router.route));
+  const depth = onTab(next) ? 0 : (current.depth ?? 0) + (replace ? 0 : 1);
+  const state: Entry = { inApp: true, tab: next.tab, browse: next.browse, depth };
   if (replace) history.replaceState(state, "", href);
   else history.pushState(state, "", href);
   apply(next, false);
@@ -81,14 +110,14 @@ export function goBack(fallback: string) {
   else navigate(fallback, { replace: true });
 }
 
-/** A tab bar tap: switch tabs, pop a film page off the tab, or scroll to the top. */
+/** A tab bar tap: switch tabs, pop the pages pushed over the tab, or scroll to the top. */
 export function selectTab(tab: Tab) {
   const { route } = router;
-  if (route.tab === tab && route.movie == null) {
+  if (route.tab === tab && onTab(route)) {
     window.scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
     return;
   }
-  if (route.tab === tab && route.movie != null) {
+  if (route.tab === tab) {
     const depth = entry().depth ?? 0;
     if (entry().inApp && depth > 0) {
       history.go(-depth);
@@ -109,12 +138,13 @@ export function rememberQuery(q: string) {
 
 addEventListener("popstate", (event) => {
   const state = event.state && event.state.inApp ? (event.state as Entry) : null;
-  apply(parse(location.hash, state?.tab ?? router.route.tab), true);
+  const base = state ? { tab: state.tab, browse: state.browse ?? null } : baseOf(router.route);
+  apply(parse(location.hash, base), true);
 });
 
 // A hash typed by hand (or an old bookmark) arrives without our history state.
 addEventListener("hashchange", () => {
-  const next = parse(location.hash, router.route.tab);
+  const next = parse(location.hash, baseOf(router.route));
   if (JSON.stringify(next) !== JSON.stringify(router.route)) apply(next, true);
 });
 
