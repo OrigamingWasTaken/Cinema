@@ -495,6 +495,16 @@ class TestTvSetup(unittest.TestCase):
         self.assertIn("- SONARR_API_KEY=${SONARR_API_KEY:-}", text)
         self.assertIn("- DOTNET_GCConserveMemory=7", text)
 
+    def test_compose_caps_sonarr_memory(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "docker-compose.yml")
+        with open(path) as f:
+            text = f.read()
+        start = text.index("\n  sonarr:\n")
+        end = text.index("\n  flaresolverr:\n")
+        sonarr = text[start:end]
+        self.assertIn("- DOTNET_GCHeapHardLimit=0x10000000", sonarr)
+        self.assertIn("\n    mem_limit: 400m\n", sonarr)
+
 
 def make_sonarr(state=None):
     import setup

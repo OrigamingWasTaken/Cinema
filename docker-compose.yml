@@ -70,6 +70,8 @@ services:
       - TZ=${TZ}
       - DOTNET_GCConserveMemory=7
       - DOTNET_gcServer=0
+      - DOTNET_GCHeapHardLimit=0x10000000
+    mem_limit: 400m
     volumes:
       - ${CONFIG_PATH}/sonarr:/config
       - ${DATA_PATH}:/data

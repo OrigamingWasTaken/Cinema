@@ -157,7 +157,8 @@ cinema state, the Sonarr database and the rqbit database.
   under **More versions**.
 - The Infuse share does not work: check that it is WebDAV, not SMB, with port
   8888 and path `/dav`.
-- Memory is small: cinema uses about 55 MiB, rqbit about 20 MiB and Sonarr about 250 MiB.
+- Memory is small: cinema uses about 55 MiB, rqbit about 20 MiB and Sonarr about 250 MiB
+  (its .NET heap is capped at 256 MiB and the container at 400 MiB).
   `sudo docker stats --no-stream` shows the current numbers.
 
 ## Phone app development
