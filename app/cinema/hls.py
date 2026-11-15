@@ -5,6 +5,7 @@ import bisect
 import logging
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -77,6 +78,8 @@ class Proc(Protocol):
 
 
 class Runner(Protocol):
+    def check(self) -> None: ...
+
     def start(self, path: Path, info: MediaInfo, segments: list[Segment], first: int,
               out_dir: Path) -> Proc: ...
 
@@ -108,6 +111,23 @@ class _Process:
             self._signal(signal.SIGCONT)
 
 
+MIN_FFMPEG = 6
+
+
+def ffmpeg_major(version_output: str) -> int | None:
+    """The major version in `ffmpeg -version` output; None for a git build or junk."""
+    m = re.match(r"ffmpeg version n?(\d+)\.", version_output)
+    return int(m.group(1)) if m else None
+
+
+def _ffmpeg_version() -> str:
+    try:
+        return subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True,
+                              timeout=10).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        raise MediaError(f"cannot run ffmpeg: {e}") from e
+
+
 class FfmpegRunner:
     """Writes `out_dir/init.mp4` and `out_dir/{n}.m4s` from segment `first` on.
 
@@ -117,7 +137,28 @@ class FfmpegRunner:
     identical for every restart) and one moof+mdat run per segment. `frag_discont` makes
     each segment's tfdt the absolute decode time; `negative_cts_offsets` sets decode time
     = presentation time on the first keyframe, so B-frame delay never makes it negative.
+
+    The segment muxer counts -segment_times from the first packet only since FFmpeg 6.0
+    (5.1 compares them with the absolute -copyts times and cuts at every keyframe after
+    a mid-file start), so older versions are refused.
     """
+
+    def __init__(self, version: Callable[[], str] = _ffmpeg_version) -> None:
+        self._version = version
+        self._problem: str | None = None  # "" once the version is known to be fine
+
+    def check(self) -> None:
+        """Raise MediaError when ffmpeg is older than MIN_FFMPEG (asked once, then kept)."""
+        if self._problem is None:
+            major = ffmpeg_major(self._version())
+            if major is None:
+                log.warning("unknown ffmpeg version; browser playback needs FFmpeg %d or newer",
+                            MIN_FFMPEG)
+            self._problem = (f"ffmpeg {major} is too old: browser playback needs FFmpeg "
+                             f"{MIN_FFMPEG} or newer" if major is not None and major < MIN_FFMPEG
+                             else "")
+        if self._problem:
+            raise MediaError(self._problem)
 
     def command(self, path: Path, info: MediaInfo, segments: list[Segment], first: int,
                 out_dir: Path) -> list[str]:
@@ -169,6 +210,7 @@ class FfmpegRunner:
 
     def start(self, path: Path, info: MediaInfo, segments: list[Segment], first: int,
               out_dir: Path) -> Proc:
+        self.check()
         out_dir.mkdir(parents=True, exist_ok=True)
         cmd = self.command(path, info, segments, first, out_dir)
         try:

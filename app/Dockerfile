@@ -8,7 +8,8 @@ COPY web/ ./
 RUN npm run build -- --outDir /web-out --emptyOutDir
 
 # Stage 2: the API, which also serves the built app from cinema/static.
-FROM python:3.12-slim
+# trixie: FFmpeg 7.1 (bookworm has 5.1, whose segment muxer cuts HLS segments wrong).
+FROM python:3.12-slim-trixie
 WORKDIR /srv
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .

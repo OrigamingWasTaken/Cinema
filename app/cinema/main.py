@@ -14,7 +14,7 @@ from cinema.api import build_api_router, register_error_handlers
 from cinema.config import Settings, load_settings
 from cinema.downloads import run_poller
 from cinema.hls import StreamSessions
-from cinema.media import Prober
+from cinema.media import MediaError, Prober
 from cinema.play import build_play_router
 from cinema.prowlarr import ProwlarrClient, api_key_from_config_xml
 from cinema.rqbit import RqbitClient
@@ -103,6 +103,11 @@ def create_app(settings: Settings, *, store: Store | None = None,
     async def lifespan(_: FastAPI):
         # Leftovers of a crashed run.
         _clear_dir(sessions.tmp_root)
+        try:
+            await asyncio.to_thread(sessions.runner.check)
+        except MediaError as e:
+            # Everything else still works; browser playback answers 502 until fixed.
+            log.error("browser playback is off: %s", e)
         reaper = asyncio.create_task(sessions.run_reaper())
         pollers = ([asyncio.create_task(run_poller(store, rqbit)),
                     asyncio.create_task(run_shows_poller(tracker))] if start_poller else [])

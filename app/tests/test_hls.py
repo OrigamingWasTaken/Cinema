@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from cinema.hls import (BusyError, FfmpegRunner, StreamSessions, _Process, plan_segments,
-                        render_playlist)
+from cinema.hls import (BusyError, FfmpegRunner, StreamSessions, _Process, ffmpeg_major,
+                        plan_segments, render_playlist)
 from cinema.media import MediaError, MediaInfo, Prober
 
 
@@ -75,6 +75,10 @@ class FakeRunner:
         self.writes_init = True
         self.starts = []
         self.procs = []
+        self.checks = 0
+
+    def check(self):
+        self.checks += 1
 
     def start(self, path, info, segments, first, out_dir):
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -384,19 +388,22 @@ def _first_packet(init: Path, seg: Path, tmp_path: Path, stream: str) -> dict:
 @pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
                     reason="ffmpeg not installed")
 async def test_real_ffmpeg_segment_times_match_playlist(tmp_path):
+    # Tiny and silent: 60 s at 160x90, a keyframe every 2 s, 10 segments of 6 s.
     f = tmp_path / "sample.mkv"
     subprocess.run(
-        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24000/1001",
-         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "30",
-         "-c:v", "libx264", "-bf", "3", "-x264-params", "b-adapt=0",
+        ["nice", "-n", "19", "ffmpeg", "-v", "error", "-threads", "2",
+         "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24000/1001",
+         "-f", "lavfi", "-i", "anullsrc=sample_rate=48000:channel_layout=5.1", "-t", "60",
+         "-c:v", "libx264", "-threads", "2", "-bf", "3", "-x264-params", "b-adapt=0",
          "-force_key_frames", "expr:gte(t,n_forced*2)", "-sc_threshold", "0",
-         "-c:a", "ac3", "-ac", "6", str(f)], check=True)
+         "-c:a", "ac3", str(f)], check=True)
     info = await Prober(tmp_path / "cache").probe(f)
     segs = plan_segments(info.keyframes, info.duration)
-    assert len(segs) == 5
+    assert len(segs) == 10
 
     class Spy(FfmpegRunner):
         def __init__(self):
+            super().__init__()
             self.starts = []
 
         def start(self, path, info, segments, first, out_dir):
@@ -408,17 +415,21 @@ async def test_real_ffmpeg_segment_times_match_playlist(tmp_path):
     key = ("dev", "item")
     try:
         got = {}
-        # Seek straight to the last segment, then back to the start (a restart).
-        got[4] = (await s.segment(key, f, info, 4)).read_bytes()
+        # Start mid-file (a resume): this run makes two cuts after its first segment,
+        # which FFmpeg < 6 would place on every keyframe instead.
+        for n in (2, 3, 4):
+            got[n] = (await s.segment(key, f, info, n)).read_bytes()
+        assert spy.starts == [2]
         init = tmp_path / "init.mp4"
         init.write_bytes((await s.init(key, f, info)).read_bytes())
-        for n in range(4):
+        # Back to the start (a restart), then on to the end.
+        for n in (0, 1, 5, 6, 7, 8, 9):
             got[n] = (await s.segment(key, f, info, n)).read_bytes()
-        assert spy.starts == [4, 0]
+        assert spy.starts[:2] == [2, 0]
     finally:
         await s.close_all()
 
-    for n, data in got.items():
+    for n, data in sorted(got.items()):
         seg = tmp_path / f"{n}.m4s"
         seg.write_bytes(data)
         video = _first_packet(init, seg, tmp_path, "v:0")
@@ -432,7 +443,40 @@ async def test_real_ffmpeg_segment_times_match_playlist(tmp_path):
 
     # The one init with segments from both runs plays through without errors.
     whole = tmp_path / "whole.mp4"
-    whole.write_bytes(init.read_bytes() + b"".join(got[n] for n in range(5)))
-    decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", str(whole), "-f", "null", "-"],
+    whole.write_bytes(init.read_bytes() + b"".join(got[n] for n in range(10)))
+    decoded = subprocess.run(["nice", "-n", "19", "ffmpeg", "-v", "error", "-threads", "2",
+                              "-i", str(whole), "-f", "null", "-"],
                              capture_output=True, text=True)
     assert decoded.returncode == 0 and decoded.stderr == ""
+
+
+def test_ffmpeg_major_versions():
+    assert ffmpeg_major("ffmpeg version 5.1.6-0+deb12u1 Copyright (c) 2000-2024") == 5
+    assert ffmpeg_major("ffmpeg version 7.1.1-1+b1 Copyright (c) 2000-2025") == 7
+    assert ffmpeg_major("ffmpeg version n9.0.2 Copyright (c) 2000-2026") == 9
+    assert ffmpeg_major("ffmpeg version N-113000-gabcdef Copyright") is None  # a git build
+    assert ffmpeg_major("") is None
+
+
+def test_ffmpeg_older_than_6_is_refused(tmp_path):
+    asked = []
+
+    def old():
+        asked.append(1)
+        return "ffmpeg version 5.1.6-0+deb12u1 Copyright (c) 2000-2024\n"
+    runner = FfmpegRunner(version=old)
+    with pytest.raises(MediaError, match="FFmpeg 6"):
+        runner.check()
+    with pytest.raises(MediaError, match="FFmpeg 6"):
+        runner.start(Path("/m/f.mkv"), INFO, plan_segments(INFO.keyframes, INFO.duration), 0,
+                     tmp_path / "run")
+    assert len(asked) == 1  # asked once, then remembered
+    assert not (tmp_path / "run").exists()
+    FfmpegRunner(version=lambda: "ffmpeg version 7.1.1-1+b1\n").check()
+    FfmpegRunner(version=lambda: "ffmpeg version N-113000-gabcdef\n").check()
+
+
+def test_image_pins_an_ffmpeg_6_debian():
+    # Debian bookworm ships FFmpeg 5.1; trixie ships 7.1.
+    dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
+    assert "FROM python:3.12-slim-trixie\n" in dockerfile

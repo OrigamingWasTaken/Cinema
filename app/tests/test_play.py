@@ -199,3 +199,16 @@ def test_episode_skips_a_matching_entry_without_a_file(env):
     missing = replace(env.tracker.entries[0], path=env.tmp / "gone.mkv")
     env.tracker.entries = [missing, replace(missing, path=path)]
     assert env.client().get("/api/play/episode/1396/1/1").status_code == 200
+
+
+def test_lifespan_checks_ffmpeg_and_logs_a_too_old_one(tmp_path, settings, caplog):
+    env = PlayEnv(tmp_path, settings)
+
+    def too_old():
+        env.sessions.runner.checks += 1
+        raise MediaError("ffmpeg 5 is too old: browser playback needs FFmpeg 6 or newer")
+    env.sessions.runner.check = too_old
+    with TestClient(env.app) as c:
+        assert c.get("/healthz").status_code == 200
+    assert env.sessions.runner.checks == 1
+    assert any(r.levelname == "ERROR" and "FFmpeg 6" in r.getMessage() for r in caplog.records)
