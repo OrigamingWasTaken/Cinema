@@ -93,13 +93,20 @@ class FakeRqbit:
             return self._json(200, {"id": tid, "details": self._details(only),
                                     "output_folder": out})
 
-        m = re.fullmatch(r"/torrents/(\d+)/(stats/v1|pause|delete|stream/(\d+))", path)
+        if request.method == "GET" and path == "/torrents":
+            return self._json(200, {"torrents": [
+                {"id": t["id"], "info_hash": t["info_hash"], "name": self.name,
+                 "output_folder": t["output_folder"]}
+                for t in self.torrents.values() if not t["deleted"]]})
+        m = re.fullmatch(r"/torrents/(\d+)(?:/(stats/v1|pause|delete|stream/(\d+)))?", path)
         if not m:
             return httpx.Response(404, text="not found")
         tid = int(m.group(1))
         if tid not in self.torrents:
             return httpx.Response(404, text="torrent not found")
         action = m.group(2)
+        if action is None:
+            return self._json(200, self._details(self.torrents[tid]["only_files"]))
         if action == "stats/v1":
             return self._json(200, self._stats(tid))
         if action == "pause":
@@ -129,9 +136,17 @@ class FakeRqbit:
                     "time_remaining": None,
                     "snapshot": {"peer_stats": {"live": 1}}}
         return {"state": "paused" if t["paused"] else ("live" if live else "finished"),
-                "file_progress": [], "error": None, "progress_bytes": got,
+                "file_progress": self._file_progress(tid), "error": None, "progress_bytes": got,
                 "uploaded_bytes": 0, "total_bytes": total, "finished": finished,
                 "live": live}
+
+    def _file_progress(self, tid: int) -> list[int]:
+        out = []
+        for i in range(len(self.files)):
+            data = self.content.get((tid, i))
+            out.append(0 if data is None
+                       else min(self.available.get((tid, i), len(data)), len(data)))
+        return out
 
     def _stream(self, tid: int, idx: int, request: httpx.Request) -> httpx.Response:
         key = (tid, idx)

@@ -50,6 +50,15 @@ class TorrentStats:
     download_bps: float
     live_peers: int
     eta_s: int | None
+    file_progress: list[int] = field(default_factory=list)
+
+
+@dataclass
+class TorrentSummary:
+    id: int
+    info_hash: str
+    name: str | None
+    output_folder: str
 
 
 def pick_video_file(files: list[TorrentFile]) -> TorrentFile | None:
@@ -132,7 +141,27 @@ class RqbitClient:
             download_bps=mbps * MIB,
             live_peers=((live.get("snapshot") or {}).get("peer_stats") or {}).get("live", 0),
             eta_s=_eta_secs(remaining),
+            file_progress=list(data.get("file_progress") or []),
         )
+
+    async def list_torrents(self) -> list[TorrentSummary]:
+        data = (await self._request("GET", "/torrents")).json()
+        return [
+            TorrentSummary(
+                id=t["id"],
+                info_hash=t.get("info_hash", ""),
+                name=t.get("name"),
+                output_folder=t.get("output_folder", ""),
+            )
+            for t in data.get("torrents", [])
+        ]
+
+    async def files(self, torrent_id: int) -> list[TorrentFile]:
+        data = (await self._request("GET", f"/torrents/{torrent_id}")).json()
+        return [
+            TorrentFile(i, "/".join(f["components"]), f["length"])
+            for i, f in enumerate(data.get("files", []))
+        ]
 
     async def pause(self, torrent_id: int) -> None:
         await self._request("POST", f"/torrents/{torrent_id}/pause")

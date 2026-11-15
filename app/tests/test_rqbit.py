@@ -85,3 +85,48 @@ def test_pick_video_file_skips_sample_and_nonvideo():
 def test_stream_url():
     c = RqbitClient("http://rqbit:3030/", httpx.AsyncClient())
     assert c.stream_url(3, 2) == "http://rqbit:3030/torrents/3/stream/2"
+
+
+@pytest.mark.anyio
+async def test_list_torrents_parses_summary():
+    fake = FakeRqbit(FILES, info_hash="ab" * 20)
+    client = make(fake)
+    await client.add("magnet:?x", only_file=0, output_folder="/data/a")
+    await client.add("magnet:?y", only_file=0, output_folder="/data/b")
+    summaries = await client.list_torrents()
+    assert [s.id for s in summaries] == [0, 1]
+    assert summaries[0].info_hash == "ab" * 20
+    assert summaries[0].info_hash == summaries[0].info_hash.lower()
+    assert summaries[1].name == "Sintel" and summaries[1].output_folder == "/data/b"
+
+
+@pytest.mark.anyio
+async def test_files_lists_all_files_in_order():
+    fake = FakeRqbit(FILES)
+    client = make(fake)
+    added = await client.add("magnet:?x", only_file=0, output_folder="/x")
+    files = await client.files(added.id)
+    assert files == [TorrentFile(0, "Sintel/Sintel.mkv", 1000),
+                     TorrentFile(1, "Sintel/Sample/sample.mkv", 10),
+                     TorrentFile(2, "Sintel/info.nfo", 5)]
+
+
+@pytest.mark.anyio
+async def test_stats_file_progress():
+    fake = FakeRqbit([(["a.mkv"], 100), (["b.mkv"], 50)])
+    client = make(fake)
+    added = await client.add("magnet:?x", only_file=0, output_folder="/x")
+    fake.content[(added.id, 0)] = b"x" * 100
+    fake.content[(added.id, 1)] = b"y" * 50
+    fake.available[(added.id, 0)] = 40
+    fake.available[(added.id, 1)] = 50
+    assert (await client.stats(added.id)).file_progress == [40, 50]
+
+
+@pytest.mark.anyio
+async def test_list_torrents_http_error_is_rqbit_error():
+    def handler(request):
+        return httpx.Response(500, text="boom")
+    bad = RqbitClient("http://r", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(RqbitError):
+        await bad.list_torrents()
