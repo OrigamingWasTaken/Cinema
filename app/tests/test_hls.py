@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from cinema.hls import (BusyError, FfmpegRunner, StreamSessions, _Process, ffmpeg_major,
-                        plan_segments, render_playlist)
+import asyncio
+
+from cinema.hls import (BusyError, FfmpegRunner, NoSegment, StreamSessions, Superseded, _Process,
+                        ffmpeg_major, plan_segments, render_playlist)
 from cinema.media import MediaError, MediaInfo, Prober
 
 
@@ -194,6 +196,36 @@ async def test_seek_restarts_at_segment(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_segment_out_of_range_is_no_segment(tmp_path):
+    s = sessions_for(tmp_path, FakeRunner())
+    for n in (-1, 50):
+        with pytest.raises(NoSegment):
+            await s.segment(("d1", "m1"), tmp_path / "f.mkv", INFO, n)
+
+
+@pytest.mark.anyio
+async def test_init_follows_a_restart_during_its_wait(tmp_path):
+    runner = FakeRunner()
+    runner.writes_init = False  # the first run is slow to write it
+    s = sessions_for(tmp_path, runner)
+    key, f = ("d1", "m1"), tmp_path / "f.mkv"
+    waiting = asyncio.ensure_future(s.init(key, f, INFO))
+    await asyncio.sleep(0.1)
+    runner.writes_init = True
+    assert (await s.segment(key, f, INFO, 40)).read_bytes() == b"seg40"  # a seek restarts
+    assert (await asyncio.wait_for(waiting, 2)).read_bytes() == b"init"
+    assert runner.starts == [0, 40]
+    # a closed session still ends the wait
+    runner.writes_init = False
+    other = ("d2", "m1")
+    waiting = asyncio.ensure_future(s.init(other, f, INFO))
+    await asyncio.sleep(0.1)
+    await s.close_all()
+    with pytest.raises(Superseded):
+        await asyncio.wait_for(waiting, 2)
+
+
+@pytest.mark.anyio
 async def test_segment_waits_until_the_next_one_exists(tmp_path):
     runner = FakeRunner(ahead=1)
     s = sessions_for(tmp_path, runner, wait_s=0.3)
@@ -354,11 +386,13 @@ def test_ffmpeg_command_shape(tmp_path):
     cmd = FfmpegRunner().command(Path("/m/f.mkv"), info, segs, 1, tmp_path)
     assert cmd[:3] == ["nice", "-n", "10"]
     if shutil.which("ionice"):
-        assert cmd[3:6] == ["ionice", "-c3", "ffmpeg"]
+        assert cmd[3:8] == ["ionice", "-c2", "-n7", "-t", "ffmpeg"]
     else:
         assert cmd[3] == "ffmpeg"
     i = cmd.index("-i")
     assert cmd[i + 1] == "file:/m/f.mkv"
+    maps = [cmd[k + 1] for k, a in enumerate(cmd) if a == "-map"]
+    assert maps == ["0:V:0", "0:a:0"]  # V: never the cover art
     ss = cmd.index("-ss")
     assert ss < i and 6.0 < float(cmd[ss + 1]) < 8.0
     assert cmd[cmd.index("-c:v") + 1] == "copy"
@@ -397,7 +431,7 @@ async def test_real_ffmpeg_segment_times_match_playlist(tmp_path):
          "-c:v", "libx264", "-threads", "2", "-bf", "3", "-x264-params", "b-adapt=0",
          "-force_key_frames", "expr:gte(t,n_forced*2)", "-sc_threshold", "0",
          "-c:a", "ac3", str(f)], check=True)
-    info = await Prober(tmp_path / "cache").probe(f)
+    info = await Prober(tmp_path / "cache").indexed(f)
     segs = plan_segments(info.keyframes, info.duration)
     assert len(segs) == 10
 

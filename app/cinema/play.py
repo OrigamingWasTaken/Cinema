@@ -10,8 +10,9 @@ from fastapi import APIRouter, Query
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from cinema.api import NotFoundError, UpstreamError
-from cinema.hls import BusyError, StreamSessions, plan_segments, render_playlist
-from cinema.media import MediaError, Prober
+from cinema.hls import (BusyError, NoSegment, StreamSessions, Superseded, plan_segments,
+                        render_playlist)
+from cinema.media import MediaError, MediaInfo, Prober
 from cinema.shows import ShowsTracker
 from cinema.store import Store
 
@@ -19,6 +20,10 @@ log = logging.getLogger(__name__)
 
 DEVICE_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 DIRECT_EXTENSIONS = {".mp4", ".m4v"}
+# How long a stream request waits for the keyframe index before answering "preparing":
+# with ffmpeg's own wait for the init segment, well inside a reverse proxy's 60 s.
+INDEX_WAIT_S = 15.0
+RETRY_AFTER_S = 3
 
 
 @dataclass(frozen=True)
@@ -64,20 +69,35 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
             log.warning("probe failed: %s", exc)
             raise UpstreamError("player") from exc
 
+    async def indexed(item: Item, wait: float = INDEX_WAIT_S) -> MediaInfo | None:
+        """The info with its keyframes; None while the index is still being built."""
+        try:
+            return await prober.indexed(item.path, wait=wait)
+        except (MediaError, OSError) as exc:
+            log.warning("keyframe index failed: %s", exc)
+            raise UpstreamError("player") from exc
+
     async def stream(call):
         try:
             return await call
         except BusyError:
             return JSONResponse({"error": "busy"}, status_code=429)
-        except IndexError as exc:
+        except NoSegment as exc:
             raise NotFoundError() from exc
+        except Superseded as exc:
+            # A seek or a closed tab: the player has moved on and asks again if needed.
+            log.debug("stream wait ended: %s", exc)
+            raise UpstreamError("player") from exc
         except (MediaError, OSError) as exc:
             log.warning("stream failed: %s", exc)
             raise UpstreamError("player") from exc
 
     async def info_of(item: Item, base: str):
         info = await probe(item)
-        direct = item.path.suffix.lower() in DIRECT_EXTENSIONS
+        direct = item.path.suffix.lower() in DIRECT_EXTENSIONS and info.direct_codec_ok
+        if not direct:
+            # HLS ahead: start the keyframe index now, without waiting for it.
+            await indexed(item, wait=0)
         return {
             "title": item.title, "subtitle": item.subtitle, "duration": info.duration,
             "container": info.container, "video_codec": info.video_codec,
@@ -95,7 +115,9 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
         dev = device(d)
         if not dev:
             return _bad_device()
-        info = await probe(item)
+        info = await indexed(item)
+        if info is None:
+            return _preparing()
         # Starting the session here makes the cap apply to the playlist, not to a segment.
         res = await stream(sessions.init((dev, item.item_id), item.path, info))
         if isinstance(res, Response):
@@ -110,7 +132,9 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
         dev = device(d)
         if not dev:
             return _bad_device()
-        info = await probe(item)
+        info = await indexed(item)
+        if info is None:
+            return _preparing()
         res = await stream(sessions.init((dev, item.item_id), item.path, info))
         return res if isinstance(res, Response) else await _send(res, "video/mp4")
 
@@ -118,7 +142,9 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
         dev = device(d)
         if not dev:
             return _bad_device()
-        info = await probe(item)
+        info = await indexed(item)
+        if info is None:
+            return _preparing()
         res = await stream(sessions.segment((dev, item.item_id), item.path, info, n))
         return res if isinstance(res, Response) else await _send(res, "video/iso.segment")
 
@@ -175,6 +201,12 @@ def build_play_router(store: Store, tracker: ShowsTracker, prober: Prober,
 
 def _bad_device() -> Response:
     return JSONResponse({"error": "bad_device"}, status_code=400)
+
+
+def _preparing() -> Response:
+    """The keyframe index of a long file is still being built: ask again shortly."""
+    return JSONResponse({"error": "preparing"}, status_code=503,
+                        headers={"Retry-After": str(RETRY_AFTER_S), "Cache-Control": "no-store"})
 
 
 async def _send(path: Path, media_type: str) -> Response:

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .media import MediaError, MediaInfo
+from .media import MediaError, MediaInfo, low_priority
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,14 @@ def render_playlist(segments: list[Segment], *, init_uri: str,
 
 class BusyError(Exception):
     pass
+
+
+class NoSegment(Exception):
+    """The playlist has no segment with that number."""
+
+
+class Superseded(MediaError):
+    """A wait ended because its run was replaced (a seek) or its session closed."""
 
 
 class Proc(Protocol):
@@ -180,14 +188,10 @@ class FfmpegRunner:
             cuts.append((before + s) / 2 - start)
         times = ",".join(f"{t:.6f}" for t in cuts or [1e9])
 
-        # Low CPU priority, and idle IO priority where ionice exists, so rqbit and
-        # WebDAV (Infuse) always come first.
-        cmd = ["nice", "-n", "10"]
-        if shutil.which("ionice"):
-            cmd += ["ionice", "-c3"]
-        cmd += ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+        # V (capital): the first real video stream, never the cover art.
+        cmd = [*low_priority(), "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                "-noaccurate_seek", "-ss", f"{seek:.6f}", "-copyts", "-start_at_zero",
-               "-i", f"file:{path}", "-map", "0:v:0"]
+               "-i", f"file:{path}", "-map", "0:V:0"]
         if info.audio_codec:
             cmd += ["-map", "0:a:0"]
         cmd += ["-map_metadata", "-1", "-map_chapters", "-1", "-c:v", "copy"]
@@ -268,14 +272,22 @@ class StreamSessions:
     async def init(self, key: tuple[str, str], path: Path, info: MediaInfo) -> Path:
         s = self._session(key, info)
         kept = s.dir / "init.mp4"
-        if kept.exists():
-            return kept
-        run = s.run
-        if run is None or (run.proc.done() and not (run.dir / "init.mp4").exists()):
-            run = self._start(s, path, info, run.first if run else 0)
-        made, first = run.dir / "init.mp4", run.dir / f"{run.first}.m4s"
-        await self._wait(s, run, lambda ended: made.exists() and (ended or first.exists()),
-                         "the init segment")
+        while True:
+            if kept.exists():
+                return kept
+            run = s.run
+            if run is None or (run.proc.done() and not (run.dir / "init.mp4").exists()):
+                run = self._start(s, path, info, run.first if run else 0)
+            made, first = run.dir / "init.mp4", run.dir / f"{run.first}.m4s"
+            try:
+                await self._wait(s, run, lambda ended: made.exists() and (ended or first.exists()),
+                                 "the init segment")
+                break
+            except Superseded:
+                # A seek replaced the run: every run writes the same init, so wait for the
+                # new one. A closed session ends the wait.
+                if self._sessions.get(key) is not s or s.run is None:
+                    raise
         # Keep the first run's init: every run writes the same one, and a restart
         # deletes its run directory.
         try:
@@ -291,7 +303,7 @@ class StreamSessions:
                       n: int) -> Path:
         s = self._session(key, info)
         if not 0 <= n < len(s.segments):
-            raise IndexError(f"no segment {n}")
+            raise NoSegment(f"no segment {n}")
         run = s.run
         s.requested = n
         if run is None or self._must_restart(run, n):
@@ -440,7 +452,7 @@ class StreamSessions:
         deadline = time.monotonic() + self.wait_s
         while True:
             if s.run is not run:
-                raise MediaError(f"{what}: the stream was restarted or closed")
+                raise Superseded(f"{what}: the stream was restarted or closed")
             ended = run.proc.done()  # read before the files, so a final write is seen
             if ready(ended):
                 return

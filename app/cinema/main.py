@@ -114,14 +114,19 @@ def create_app(settings: Settings, *, store: Store | None = None,
         try:
             yield
         finally:
-            reaper.cancel()
-            await asyncio.gather(reaper, return_exceptions=True)
-            await sessions.close_all()
-            for poller in pollers:
-                poller.cancel()
-            await asyncio.gather(*pollers, return_exceptions=True)
-            if owned_http is not None:
-                await owned_http.aclose()
+            # Nested, so a failing step never leaves the next ones undone.
+            try:
+                reaper.cancel()
+                await asyncio.gather(reaper, return_exceptions=True)
+                await sessions.close_all()
+            finally:
+                try:
+                    for poller in pollers:
+                        poller.cancel()
+                    await asyncio.gather(*pollers, return_exceptions=True)
+                finally:
+                    if owned_http is not None:
+                        await owned_http.aclose()
 
     app = FastAPI(title="Cinema", lifespan=lifespan)
     app.state.settings = settings

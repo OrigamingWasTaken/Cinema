@@ -1,9 +1,10 @@
+import logging
 from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from cinema.hls import StreamSessions
+from cinema.hls import StreamSessions, Superseded
 from cinema.media import MediaError
 from tests.test_hls import INFO, FakeRunner
 from tests.test_webdav import CONTENT, Env
@@ -11,18 +12,26 @@ from tests.test_webdav_shows import entry
 
 DEV = "device-0001"
 MKV = replace(INFO, container="mkv")
-MP4 = replace(INFO, container="mp4")
+MP4 = replace(INFO, container="mp4", codec_tag="avc1", profile_known=True)
 
 
 class FakeProber:
     def __init__(self, info=INFO):
         self.info = info
         self.error: Exception | None = None
+        self.ready = True  # the keyframe index is built
+        self.waits: list[float | None] = []
 
     async def probe(self, path):
         if self.error:
             raise self.error
-        return self.info
+        return replace(self.info, keyframes=())
+
+    async def indexed(self, path, wait=None):
+        self.waits.append(wait)
+        if self.error:
+            raise self.error
+        return self.info if self.ready else None
 
 
 class PlayEnv(Env):
@@ -212,3 +221,99 @@ def test_lifespan_checks_ffmpeg_and_logs_a_too_old_one(tmp_path, settings, caplo
         assert c.get("/healthz").status_code == 200
     assert env.sessions.runner.checks == 1
     assert any(r.levelname == "ERROR" and "FFmpeg 6" in r.getMessage() for r in caplog.records)
+
+
+def test_playlist_answers_preparing_until_the_index_is_built(env):
+    m = env.add_done()
+    c = env.client()
+    base = f"/api/play/movie/{m.tmdb_id}"
+    env.prober.ready = False
+    for url in ("index.m3u8", "init.mp4", "seg/0.m4s"):
+        r = c.get(f"{base}/{url}", params={"d": DEV})
+        assert (r.status_code, r.json()) == (503, {"error": "preparing"}), url
+        assert int(r.headers["retry-after"]) >= 1
+    # no request waits longer than a reverse proxy would
+    assert env.prober.waits and all(w is not None and w <= 20 for w in env.prober.waits)
+    assert env.sessions.runner.starts == []  # no ffmpeg before the index exists
+    env.prober.ready = True
+    assert c.get(f"{base}/index.m3u8", params={"d": DEV}).status_code == 200
+
+
+def test_info_never_waits_for_the_index_and_starts_it_for_hls_files(env):
+    m = env.add_done()
+    env.prober.ready = False
+    c = env.client()
+    r = c.get(f"/api/play/movie/{m.tmdb_id}")
+    assert r.status_code == 200 and r.json()["direct_url"] is None
+    assert env.prober.waits == [0]  # mkv: HLS ahead, so the index is started now
+    mp4 = env.tmp / "movies" / "Sintel (2010)" / "Sintel.mp4"
+    mp4.write_bytes(CONTENT)
+    env.store.upsert(replace(m, file_path=str(mp4)))
+    env.prober.info, env.prober.waits = MP4, []
+    assert c.get(f"/api/play/movie/{m.tmdb_id}").json()["direct_url"].endswith("/file")
+    assert env.prober.waits == []  # direct play needs no index
+
+
+def test_hev1_or_unknown_profile_mp4_is_not_offered_direct(env):
+    m = env.add_done()
+    mp4 = env.tmp / "movies" / "Sintel (2010)" / "Sintel.mp4"
+    mp4.write_bytes(CONTENT)
+    env.store.upsert(replace(m, file_path=str(mp4)))
+    c = env.client()
+    env.prober.info = replace(MP4, video_codec="hevc", codec_string="hvc1.1.6.L120.90",
+                              codec_tag="hev1")
+    assert c.get(f"/api/play/movie/{m.tmdb_id}").json()["direct_url"] is None
+    env.prober.info = replace(MP4, profile_known=False)
+    assert c.get(f"/api/play/movie/{m.tmdb_id}").json()["direct_url"] is None
+    env.prober.info = replace(MP4, video_codec="hevc", codec_string="hvc1.1.6.L120.90",
+                              codec_tag="hvc1")
+    assert c.get(f"/api/play/movie/{m.tmdb_id}").json()["direct_url"] is not None
+
+
+def test_superseded_wait_logs_at_debug(env, caplog):
+    m = env.add_done()
+    c = env.client()
+
+    async def superseded(*a, **k):
+        raise Superseded("segment 3: the stream was restarted or closed")
+    env.sessions.segment = superseded
+    with caplog.at_level(logging.DEBUG, logger="cinema.play"):
+        r = c.get(f"/api/play/movie/{m.tmdb_id}/seg/3.m4s", params={"d": DEV})
+    assert r.status_code == 502
+    play_logs = [r for r in caplog.records if r.name == "cinema.play"]
+    assert play_logs and all(r.levelno == logging.DEBUG for r in play_logs)
+
+
+def test_lifespan_closes_pollers_and_http_even_if_close_all_fails(tmp_path, settings,
+                                                                monkeypatch):
+    import asyncio
+
+    import httpx
+
+    import cinema.main as main_mod
+    cancelled, closed = [], []
+
+    async def poller(*a, **k):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(1)
+            raise
+    monkeypatch.setattr(main_mod, "run_poller", poller)
+    monkeypatch.setattr(main_mod, "run_shows_poller", poller)
+    real_aclose = httpx.AsyncClient.aclose
+
+    async def aclose(self):
+        closed.append(1)
+        await real_aclose(self)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", aclose)
+    sessions = StreamSessions(tmp_root=tmp_path / "hls", runner=FakeRunner())
+
+    async def boom():
+        raise RuntimeError("close_all failed")
+    sessions.close_all = boom
+    app = main_mod.create_app(settings, prober=FakeProber(), sessions=sessions)
+    with pytest.raises(RuntimeError, match="close_all failed"):
+        with TestClient(app):
+            pass
+    assert (len(cancelled), closed) == (2, [1])
